@@ -12,18 +12,19 @@ const (
 )
 
 type Server struct {
-	id               string
-	leader           string
-	currentTerm      uint
-	votedFor         string
-	log              []LogEntry
-	commitIndex      uint
-	lastApplied      uint
-	votes            uint
-	servers          map[string]serverInfo
-	discoveryTimeout *time.Timer
-	electionTimeout  *time.Timer
-	voteResultsChan  chan *RequestVoteResult
+	id                string
+	leader            string
+	currentTerm       uint
+	votedFor          string
+	log               []LogEntry
+	commitIndex       uint
+	lastApplied       uint
+	votes             uint
+	servers           map[string]serverInfo
+	discoveryTimeout  *time.Timer
+	electionTimeout   *time.Timer
+	voteResultsChan   chan *RequestVoteResult
+	appendResultsChan chan *AppendEntriesResult
 }
 
 func NewServer(id string) *Server {
@@ -46,6 +47,9 @@ func (server *Server) Start(gateway Gateway) {
 	server.discoveryTimeout = time.NewTimer(discoveryTimeoutDuration)
 	server.electionTimeout = time.NewTimer(newElectionTimoutDuration())
 
+	server.voteResultsChan = make(chan *RequestVoteResult)
+	server.appendResultsChan = make(chan *AppendEntriesResult)
+
 	for {
 		select {
 		case <-server.discoveryTimeout.C:
@@ -61,6 +65,7 @@ func (server *Server) Start(gateway Gateway) {
 				server.startElection(gateway)
 			}
 		case result := <-server.voteResultsChan:
+			server.handleExternalTerm(result.Term)
 			if result.VoteGranted && result.Term == server.currentTerm {
 				server.votes++
 				if float32(server.votes)/float32(len(server.servers)) > 0.5 {
@@ -68,13 +73,25 @@ func (server *Server) Start(gateway Gateway) {
 					server.leader = server.id
 				}
 			}
+		case result := <-server.appendResultsChan:
+			server.handleExternalTerm(result.Term)
 		case msg := <-gateway.AppendEntriesMsg():
+			server.handleExternalTerm(msg.args.Term)
 			server.handleAppendEntries(msg.args, msg.result)
 			msg.done <- struct{}{}
 		case msg := <-gateway.RequestVoteMsg():
+			server.handleExternalTerm(msg.args.Term)
 			server.handleRequestVote(msg.args, msg.result)
 			msg.done <- struct{}{}
 		}
+	}
+}
+
+func (server *Server) handleExternalTerm(term uint) {
+	if term > server.currentTerm {
+		server.currentTerm = term
+		server.leader = ""
+		server.votedFor = ""
 	}
 }
 
@@ -122,7 +139,6 @@ func (server *Server) startElection(gateway Gateway) {
 		LastLogTerm:  lastLogTerm,
 	}
 
-	server.voteResultsChan = make(chan *RequestVoteResult, len(server.servers))
 	go func() {
 		for _, info := range server.servers {
 			go func() {
@@ -162,12 +178,14 @@ func (server *Server) sendHeartBeats(gateway Gateway) {
 	}
 
 	for _, info := range server.servers {
-		result := &AppendEntriesResult{}
-		if err := gateway.AppendEntries(info.id, args, result); err != nil {
-			log.Println(err)
-			continue
-		}
-
+		go func() {
+			result := &AppendEntriesResult{}
+			if err := gateway.AppendEntries(info.id, args, result); err != nil {
+				log.Println(err)
+				return
+			}
+			server.appendResultsChan <- result
+		}()
 	}
 }
 
@@ -181,8 +199,11 @@ func (server *Server) handleAppendEntries(args *AppendEntriesArgs, result *Appen
 		return
 	}
 
+	if args.Term == server.currentTerm && server.leader == server.id {
+		log.Println(server.id, "Leader Collision!!!")
+	}
+
 	server.electionTimeout.Reset(newElectionTimoutDuration())
-	server.currentTerm = args.Term
 	server.leader = args.LeaderId
 	result.Success = true
 }
@@ -196,10 +217,6 @@ func (server *Server) handleRequestVote(args *RequestVoteArgs, result *RequestVo
 	if args.Term < server.currentTerm {
 		result.VoteGranted = false
 		return
-	} else if args.Term > server.currentTerm {
-		server.currentTerm = args.Term
-		server.votedFor = ""
-		server.leader = ""
 	}
 
 	if server.votedFor == "" || server.votedFor == args.CandidateId {
