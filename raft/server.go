@@ -18,8 +18,8 @@ type Server struct {
 	currentTerm      uint
 	votedFor         string
 	log              []LogEntry
-	commitIndex      int
-	lastApplied      int
+	commitIndex      uint
+	lastApplied      uint
 	votes            uint
 	servers          map[string]serverInfo
 	discoveryTimeout *time.Timer
@@ -35,8 +35,8 @@ func NewServer(id string) *Server {
 		currentTerm: 0,
 		votedFor:    "",
 		log:         make([]LogEntry, 0),
-		commitIndex: -1,
-		lastApplied: -1,
+		commitIndex: 0,
+		lastApplied: 0,
 		votes:       0,
 		servers:     make(map[string]serverInfo),
 	}
@@ -140,12 +140,11 @@ func (server *Server) startElection(gateway Gateway) {
 	}()
 }
 
-func (server *Server) lastLogIndexAndTerm() (int, uint) {
-	var lastLogIndex int = -1
+func (server *Server) lastLogIndexAndTerm() (uint, uint) {
+	var lastLogIndex uint = uint(len(server.log))
 	var lastLogTerm uint = 0
-	if len(server.log) > 0 {
-		lastLogIndex = len(server.log) - 1
-		lastLogTerm = server.log[len(server.log)-1].Term
+	if lastLogIndex > 0 {
+		lastLogTerm = server.log[lastLogIndex-1].Term
 	}
 	return lastLogIndex, lastLogTerm
 }
@@ -206,7 +205,7 @@ func (server *Server) handleRequestVote(args *RequestVoteArgs, result *RequestVo
 	}
 
 	if server.votedFor == "" || server.votedFor == args.CandidateId {
-		if args.LastLogIndex >= server.lastApplied && (server.lastApplied <= 0 || args.LastLogTerm >= server.log[server.lastApplied].Term) {
+		if args.LastLogIndex >= server.lastApplied && (server.lastApplied == 0 || args.LastLogTerm >= server.log[server.lastApplied-1].Term) {
 			result.VoteGranted = true
 			server.votedFor = args.CandidateId
 		}

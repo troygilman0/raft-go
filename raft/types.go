@@ -28,10 +28,10 @@ type AppendEntriesMsg struct {
 type AppendEntriesArgs struct {
 	Term         uint
 	LeaderId     string
-	PrevLogIndex int
+	PrevLogIndex uint
 	PrevLogTerm  uint
 	Entries      []LogEntry
-	LeaderCommit int
+	LeaderCommit uint
 }
 
 type AppendEntriesResult struct {
@@ -48,7 +48,7 @@ type RequestVoteMsg struct {
 type RequestVoteArgs struct {
 	Term         uint
 	CandidateId  string
-	LastLogIndex int
+	LastLogIndex uint
 	LastLogTerm  uint
 }
 
