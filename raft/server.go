@@ -55,14 +55,13 @@ func (server *Server) Start(gateway Gateway) {
 		// Handle events
 		select {
 		case <-server.heartbeatTimeout.C:
+			server.heartbeatTimeout.Reset(heartbeatTimeoutDuration)
 			server.discover(gateway)
 			if server.id == server.leader {
 				server.sendAppendEntries(gateway)
 			}
-			server.heartbeatTimeout.Reset(heartbeatTimeoutDuration)
 		case <-server.electionTimeout.C:
-			electionTimoutDuration := newElectionTimoutDuration()
-			server.electionTimeout.Reset(electionTimoutDuration)
+			server.electionTimeout.Reset(newElectionTimoutDuration())
 			if server.id != server.leader {
 				server.startElection(gateway)
 			}
