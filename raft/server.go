@@ -7,13 +7,12 @@ import (
 )
 
 const (
-	minServers               = 3
+	minServersForElection    = 3
 	discoveryTimeoutDuration = 50 * time.Millisecond
 )
 
 type Server struct {
 	id               string
-	state            State
 	leader           string
 	currentTerm      uint
 	votedFor         string
@@ -30,7 +29,6 @@ type Server struct {
 func NewServer(id string) *Server {
 	return &Server{
 		id:          id,
-		state:       StateFollower,
 		leader:      "",
 		currentTerm: 0,
 		votedFor:    "",
@@ -110,7 +108,7 @@ func (server *Server) startElection(gateway Gateway) {
 	server.votes = 1
 	server.votedFor = server.id
 
-	if len(server.servers)+1 < minServers {
+	if len(server.servers)+1 < minServersForElection {
 		log.Println(server.id, "Not enough servers for election")
 		return
 	}

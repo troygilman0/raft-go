@@ -6,14 +6,6 @@ type serverInfo struct {
 	matchIndex uint
 }
 
-type State uint
-
-const (
-	StateLeader State = iota
-	StateFollower
-	StateCandidate
-)
-
 type LogEntry struct {
 	Command string
 	Term    uint
