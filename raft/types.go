@@ -56,7 +56,3 @@ type RequestVoteResult struct {
 	Term        uint
 	VoteGranted bool
 }
-
-type electionWonMsg struct {
-	term uint
-}

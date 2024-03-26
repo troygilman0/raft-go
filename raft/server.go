@@ -12,32 +12,33 @@ const (
 )
 
 type Server struct {
-	id                 string
-	state              State
-	leader             string
-	currentTerm        uint
-	votedFor           string
-	log                []LogEntry
-	commitIndex        int
-	lastApplied        int
-	servers            map[string]serverInfo
-	discoveryTimeout   *time.Timer
-	electionTimeout    *time.Timer
-	electionWonMsgChan chan electionWonMsg
+	id               string
+	state            State
+	leader           string
+	currentTerm      uint
+	votedFor         string
+	log              []LogEntry
+	commitIndex      int
+	lastApplied      int
+	votes            uint
+	servers          map[string]serverInfo
+	discoveryTimeout *time.Timer
+	electionTimeout  *time.Timer
+	voteResultsChan  chan *RequestVoteResult
 }
 
 func NewServer(id string) *Server {
 	return &Server{
-		id:                 id,
-		state:              StateFollower,
-		leader:             "",
-		currentTerm:        0,
-		votedFor:           "",
-		log:                make([]LogEntry, 0),
-		commitIndex:        -1,
-		lastApplied:        -1,
-		servers:            make(map[string]serverInfo),
-		electionWonMsgChan: make(chan electionWonMsg),
+		id:          id,
+		state:       StateFollower,
+		leader:      "",
+		currentTerm: 0,
+		votedFor:    "",
+		log:         make([]LogEntry, 0),
+		commitIndex: -1,
+		lastApplied: -1,
+		votes:       0,
+		servers:     make(map[string]serverInfo),
 	}
 }
 
@@ -59,12 +60,15 @@ func (server *Server) Start(gateway Gateway) {
 			electionTimoutDuration := newElectionTimoutDuration()
 			server.electionTimeout.Reset(electionTimoutDuration)
 			if server.id != server.leader {
-				server.startElection(gateway, electionTimoutDuration)
+				server.startElection(gateway)
 			}
-		case msg := <-server.electionWonMsgChan:
-			if msg.term == server.currentTerm {
-				log.Println(server.id, "Promoted to leader")
-				server.leader = server.id
+		case result := <-server.voteResultsChan:
+			if result.VoteGranted && result.Term == server.currentTerm {
+				server.votes++
+				if float32(server.votes)/float32(len(server.servers)) > 0.5 {
+					log.Println(server.id, "Promoted to leader")
+					server.leader = server.id
+				}
 			}
 		case msg := <-gateway.AppendEntriesMsg():
 			server.handleAppendEntries(msg.args, msg.result)
@@ -100,11 +104,11 @@ func (server *Server) discover(gateway Gateway) {
 	}
 }
 
-func (server *Server) startElection(gateway Gateway, electionTimeoutDuration time.Duration) {
+func (server *Server) startElection(gateway Gateway) {
 	log.Println(server.id, "Starting Election...")
 	server.currentTerm++
+	server.votes = 1
 	server.votedFor = server.id
-	electionTerm := server.currentTerm
 
 	if len(server.servers)+1 < minServers {
 		log.Println(server.id, "Not enough servers for election")
@@ -114,14 +118,14 @@ func (server *Server) startElection(gateway Gateway, electionTimeoutDuration tim
 	lastLogIndex, lastLogTerm := server.lastLogIndexAndTerm()
 
 	args := &RequestVoteArgs{
-		Term:         electionTerm,
+		Term:         server.currentTerm,
 		CandidateId:  server.id,
 		LastLogIndex: lastLogIndex,
 		LastLogTerm:  lastLogTerm,
 	}
 
+	server.voteResultsChan = make(chan *RequestVoteResult, len(server.servers))
 	go func() {
-		results := make(chan *RequestVoteResult, len(server.servers))
 		for _, info := range server.servers {
 			go func() {
 				result := &RequestVoteResult{}
@@ -130,27 +134,8 @@ func (server *Server) startElection(gateway Gateway, electionTimeoutDuration tim
 					log.Println(err)
 					return
 				}
-				results <- result
+				server.voteResultsChan <- result
 			}()
-		}
-
-		votes := 1
-		timeout := time.NewTimer(electionTimeoutDuration)
-		for {
-			select {
-			case <-timeout.C:
-				return
-			case result := <-results:
-				if result.VoteGranted {
-					votes++
-					if float32(votes)/float32(len(server.servers)) > 0.5 {
-						server.electionWonMsgChan <- electionWonMsg{
-							term: electionTerm,
-						}
-						return
-					}
-				}
-			}
 		}
 	}()
 }
