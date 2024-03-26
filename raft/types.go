@@ -27,6 +27,7 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesResult struct {
+	Id      string
 	Term    uint
 	Success bool
 }
