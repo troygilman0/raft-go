@@ -1,0 +1,23 @@
+version: "3"
+
+services:
+  discovery:
+    build: .
+    ports:
+      - "8000:8000"
+    networks:
+      - net
+    environment:
+      - DISCOVERY=true
+  node:
+    build: .
+    ports:
+      - "8000"
+    networks:
+      - net
+    environment:
+      - AGENT_NUMBER
+
+networks:
+  net:
+    driver: bridge

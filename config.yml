@@ -1,0 +1,5 @@
+- raft-go_node_1:8000
+- raft-go_node_2:8000
+- raft-go_node_3:8000
+- raft-go_node_4:8000
+- raft-go_node_5:8000
