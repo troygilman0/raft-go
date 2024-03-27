@@ -22,7 +22,8 @@ type Server struct {
 	commitIndex       uint
 	lastApplied       uint
 	votes             uint
-	servers           map[string]serverInfo
+	servers           map[string]*serverInfo
+	pendingCommands   map[uint]CommandMsg
 	heartbeatTimeout  *time.Timer
 	electionTimeout   *time.Timer
 	voteResultsChan   chan *RequestVoteResult
@@ -39,51 +40,84 @@ func NewServer(id string) *Server {
 		commitIndex:       0,
 		lastApplied:       0,
 		votes:             0,
-		servers:           make(map[string]serverInfo),
+		servers:           make(map[string]*serverInfo),
+		pendingCommands:   make(map[uint]CommandMsg),
 		voteResultsChan:   make(chan *RequestVoteResult),
 		appendResultsChan: make(chan *AppendEntriesResult),
 	}
 }
 
 func (server *Server) Start(gateway Gateway) {
-	log.Println(server.id, "Starting Raft Server")
+	log.Println(server.id, "- Starting Raft Server")
 
 	server.heartbeatTimeout = time.NewTimer(heartbeatTimeoutDuration)
 	server.electionTimeout = time.NewTimer(newElectionTimoutDuration())
 
+	// main event loop
 	for {
-		// Handle events
 		select {
+		case msg := <-gateway.CommandMsg():
+			// handle Command
+			server.handleCommand(msg)
+		case msg := <-gateway.AppendEntriesMsg():
+			// handle AppendEntries
+			server.handleExternalTerm(msg.args.Term)
+			server.handleAppendEntries(msg.args, msg.result)
+			msg.done <- struct{}{}
+		case msg := <-gateway.RequestVoteMsg():
+			// handle RequestVote
+			server.handleExternalTerm(msg.args.Term)
+			server.handleRequestVote(msg.args, msg.result)
+			msg.done <- struct{}{}
+		case result := <-server.appendResultsChan:
+			// handle AppendEntries result
+			server.handleExternalTerm(result.Term)
+			server.HandleAppendEntriesResult(result)
+		case result := <-server.voteResultsChan:
+			// handle RequestVote result
+			server.handleExternalTerm(result.Term)
+			server.handleRequestVoteResult(result, gateway)
 		case <-server.heartbeatTimeout.C:
+			// heartbeat timeout
 			server.heartbeatTimeout.Reset(heartbeatTimeoutDuration)
 			server.discover(gateway)
 			if server.id == server.leader {
 				server.sendAppendEntries(gateway)
 			}
 		case <-server.electionTimeout.C:
+			// election timeout
 			server.electionTimeout.Reset(newElectionTimoutDuration())
 			if server.id != server.leader {
 				server.startElection(gateway)
 			}
-		case result := <-server.voteResultsChan:
-			server.handleExternalTerm(result.Term)
-			server.handleRequestVoteResult(result, gateway)
-		case result := <-server.appendResultsChan:
-			server.handleExternalTerm(result.Term)
-			server.HandleAppendEntriesResult(result)
-		case msg := <-gateway.AppendEntriesMsg():
-			server.handleExternalTerm(msg.args.Term)
-			server.handleAppendEntries(msg.args, msg.result)
-			msg.done <- struct{}{}
-		case msg := <-gateway.RequestVoteMsg():
-			server.handleExternalTerm(msg.args.Term)
-			server.handleRequestVote(msg.args, msg.result)
-			msg.done <- struct{}{}
 		}
 
-		// Update State Machine
-		for server.commitIndex > server.lastApplied {
-			server.lastApplied++
+		server.updateStateMachine()
+	}
+}
+
+func (server *Server) updateStateMachine() {
+	for i := server.commitIndex + 1; i <= uint(len(server.log)); i++ {
+		if server.log[i-1].Term == server.currentTerm {
+			matched := 0
+			for _, info := range server.servers {
+				if info.matchIndex >= i {
+					matched++
+				}
+			}
+			if float32(matched) > float32(len(server.servers))/2 {
+				server.commitIndex = i
+				continue
+			}
+		}
+		break
+	}
+	for server.commitIndex > server.lastApplied {
+		server.lastApplied++
+		commandMsg, ok := server.pendingCommands[server.lastApplied]
+		if ok {
+			commandMsg.Result.Success = true
+			commandMsg.Done <- struct{}{}
 		}
 	}
 }
@@ -101,7 +135,6 @@ func newElectionTimoutDuration() time.Duration {
 }
 
 func (server *Server) discover(gateway Gateway) {
-	// log.Println(server.id, "Discover")
 	args := &DiscoverArgs{
 		Id: server.id,
 	}
@@ -114,7 +147,7 @@ func (server *Server) discover(gateway Gateway) {
 	lastLogIndex, _ := server.lastLogIndexAndTerm()
 	for _, serverId := range result.Servers {
 		if _, ok := server.servers[serverId]; !ok {
-			server.servers[serverId] = serverInfo{
+			server.servers[serverId] = &serverInfo{
 				id:         serverId,
 				nextIndex:  lastLogIndex + 1,
 				matchIndex: 0,
@@ -124,13 +157,13 @@ func (server *Server) discover(gateway Gateway) {
 }
 
 func (server *Server) startElection(gateway Gateway) {
-	log.Println(server.id, "Starting Election...")
+	log.Println(server.id, "- Starting Election...")
 	server.currentTerm++
 	server.votes = 1
 	server.votedFor = server.id
 
 	if len(server.servers)+1 < minServersForElection {
-		log.Println(server.id, "Not enough servers for election")
+		log.Println(server.id, "- Not enough servers for election")
 		return
 	}
 
@@ -168,7 +201,7 @@ func (server *Server) lastLogIndexAndTerm() (uint, uint) {
 }
 
 func (server *Server) sendAppendEntries(gateway Gateway) {
-	log.Println(server.id, "SendAppendEntries")
+	log.Println(server.id, "- SendAppendEntries")
 
 	lastLogIndex, _ := server.lastLogIndexAndTerm()
 
@@ -176,12 +209,12 @@ func (server *Server) sendAppendEntries(gateway Gateway) {
 		entries := []LogEntry{}
 
 		if info.nextIndex == 0 {
-			log.Println(server.id, "Error: nextIndex is 0 for", info.id)
+			log.Println(server.id, "- Error: nextIndex is 0 for", info.id)
 			continue
 		}
 
 		if lastLogIndex >= info.nextIndex {
-			entries = server.log[info.nextIndex:]
+			entries = server.log[info.nextIndex-1:]
 		}
 
 		var prevLogIndex uint = info.nextIndex - 1
@@ -211,7 +244,7 @@ func (server *Server) sendAppendEntries(gateway Gateway) {
 }
 
 func (server *Server) HandleAppendEntriesResult(result *AppendEntriesResult) {
-	log.Println(server.id, "HandleAppendEntriesResult", result)
+	server.printLogResult("HandleAppendEntriesResult", result)
 	info := server.servers[result.Id]
 	if result.Success {
 		lastLogIndex, _ := server.lastLogIndexAndTerm()
@@ -227,11 +260,11 @@ func (server *Server) handleAppendEntries(args *AppendEntriesArgs, result *Appen
 	defer func() {
 		result.Id = server.id
 		result.Term = server.currentTerm
-		log.Println(server.id, "HandleAppendEntries", args, result)
+		server.printLogArgsResult("HandleAppendEntries", args, result)
 	}()
 
 	if args.Term == server.currentTerm && server.leader == server.id {
-		log.Println(server.id, "Leader Collision!!!")
+		log.Println(server.id, "- Leader Collision!!!")
 	}
 
 	// Condition #1
@@ -243,9 +276,11 @@ func (server *Server) handleAppendEntries(args *AppendEntriesArgs, result *Appen
 
 	// Condition #2
 	// Reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
-	if len(server.log) < int(args.PrevLogIndex) || (len(server.log) > 0 && server.log[args.PrevLogIndex-1].Term != args.PrevLogTerm) {
-		result.Success = false
-		return
+	if args.PrevLogIndex > 0 {
+		if len(server.log) < int(args.PrevLogIndex) || (len(server.log) > 0 && server.log[args.PrevLogIndex-1].Term != args.PrevLogTerm) {
+			result.Success = false
+			return
+		}
 	}
 
 	var newEntryIndex uint
@@ -283,11 +318,11 @@ func (server *Server) handleAppendEntries(args *AppendEntriesArgs, result *Appen
 }
 
 func (server *Server) handleRequestVoteResult(result *RequestVoteResult, gateway Gateway) {
-	log.Println(server.id, "HandleRequestVoteResult", result)
+	server.printLogResult("HandleRequestVoteResult", result)
 	if result.VoteGranted && result.Term == server.currentTerm {
 		server.votes++
 		if float32(server.votes)/float32(len(server.servers)) > 0.5 {
-			log.Println(server.id, "Promoted to leader")
+			log.Println(server.id, "- Promoted to leader")
 			server.leader = server.id
 			lastLogIndex, _ := server.lastLogIndexAndTerm()
 			for _, info := range server.servers {
@@ -302,7 +337,7 @@ func (server *Server) handleRequestVoteResult(result *RequestVoteResult, gateway
 func (server *Server) handleRequestVote(args *RequestVoteArgs, result *RequestVoteResult) {
 	defer func() {
 		result.Term = server.currentTerm
-		log.Println(server.id, "HandleRequestVote", args, result)
+		server.printLogArgsResult("HandleRequestVote", args, result)
 	}()
 
 	// Condition #1
@@ -321,4 +356,31 @@ func (server *Server) handleRequestVote(args *RequestVoteArgs, result *RequestVo
 			server.votedFor = args.CandidateId
 		}
 	}
+}
+
+func (server *Server) handleCommand(msg CommandMsg) {
+	defer func() {
+		server.printLogArgsResult("HandleCommand", msg.Args, msg.Result)
+	}()
+
+	if server.id == server.leader {
+		server.log = append(server.log, LogEntry{
+			Command: msg.Args.Command,
+			Term:    server.currentTerm,
+		})
+		newLogIndex := len(server.log)
+		server.pendingCommands[uint(newLogIndex)] = msg
+	} else {
+		msg.Result.Success = false
+		msg.Result.Redirect = server.leader
+		msg.Done <- struct{}{}
+	}
+}
+
+func (server *Server) printLogArgsResult(action string, args any, result any) {
+	log.Printf("%s - %s Args:%+v Result:%+v", server.id, action, args, result)
+}
+
+func (server *Server) printLogResult(action string, result any) {
+	log.Printf("%s - %s Result:%+v", server.id, action, result)
 }

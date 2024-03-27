@@ -1,7 +1,6 @@
 package raft
 
 import (
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -13,8 +12,9 @@ type Gateway interface {
 	Discover(args *DiscoverArgs, result *DiscoverResult) error
 	AppendEntries(id string, args *AppendEntriesArgs, result *AppendEntriesResult) error
 	RequestVote(id string, args *RequestVoteArgs, result *RequestVoteResult) error
-	AppendEntriesMsg() <-chan *AppendEntriesMsg
-	RequestVoteMsg() <-chan *RequestVoteMsg
+	AppendEntriesMsg() <-chan AppendEntriesMsg
+	RequestVoteMsg() <-chan RequestVoteMsg
+	CommandMsg() <-chan CommandMsg
 }
 
 func NewRPCGateway(port string, discoveryAddr string) Gateway {
@@ -22,8 +22,9 @@ func NewRPCGateway(port string, discoveryAddr string) Gateway {
 		port:             port,
 		discoveryAddr:    discoveryAddr,
 		clients:          sync.Map{},
-		appendEntriesMsg: make(chan *AppendEntriesMsg),
-		requestVoteMsg:   make(chan *RequestVoteMsg),
+		appendEntriesMsg: make(chan AppendEntriesMsg),
+		requestVoteMsg:   make(chan RequestVoteMsg),
+		commandMsg:       make(chan CommandMsg),
 	}
 	go func() {
 		rpcServer, err := newRPCServer(gateway)
@@ -31,8 +32,7 @@ func NewRPCGateway(port string, discoveryAddr string) Gateway {
 			log.Fatal(err)
 		}
 		mux := http.NewServeMux()
-		mux.Handle("/", rpcServer)
-		mux.HandleFunc("POST /command", gateway.handleCommand)
+		mux.Handle("/rpc", rpcServer)
 		log.Fatal(http.ListenAndServe(":"+port, mux))
 	}()
 	return gateway
@@ -42,8 +42,9 @@ type RPCGateway struct {
 	port             string
 	discoveryAddr    string
 	clients          sync.Map
-	appendEntriesMsg chan *AppendEntriesMsg
-	requestVoteMsg   chan *RequestVoteMsg
+	appendEntriesMsg chan AppendEntriesMsg
+	requestVoteMsg   chan RequestVoteMsg
+	commandMsg       chan CommandMsg
 }
 
 func newRPCServer(handler any) (*rpc.Server, error) {
@@ -64,7 +65,7 @@ func (gateway *RPCGateway) sendRPC(name string, addr string, args any, result an
 		}
 	} else {
 		var err error
-		client, err = rpc.DialHTTP("tcp", addr)
+		client, err = rpc.DialHTTPPath("tcp", addr, "/rpc")
 		if err != nil {
 			return err
 		}
@@ -94,7 +95,7 @@ func (gateway *RPCGateway) RequestVote(id string, args *RequestVoteArgs, result 
 
 func (gateway *RPCGateway) AppendEntriesRPC(args *AppendEntriesArgs, result *AppendEntriesResult) error {
 	done := make(chan struct{})
-	gateway.appendEntriesMsg <- &AppendEntriesMsg{
+	gateway.appendEntriesMsg <- AppendEntriesMsg{
 		args:   args,
 		result: result,
 		done:   done,
@@ -105,7 +106,7 @@ func (gateway *RPCGateway) AppendEntriesRPC(args *AppendEntriesArgs, result *App
 
 func (gateway *RPCGateway) RequestVoteRPC(args *RequestVoteArgs, result *RequestVoteResult) error {
 	done := make(chan struct{})
-	gateway.requestVoteMsg <- &RequestVoteMsg{
+	gateway.requestVoteMsg <- RequestVoteMsg{
 		args:   args,
 		result: result,
 		done:   done,
@@ -114,22 +115,25 @@ func (gateway *RPCGateway) RequestVoteRPC(args *RequestVoteArgs, result *Request
 	return nil
 }
 
-func (gateway *RPCGateway) AppendEntriesMsg() <-chan *AppendEntriesMsg {
+func (gateway *RPCGateway) CommandRPC(args *CommandArgs, result *CommandResult) error {
+	done := make(chan struct{})
+	gateway.commandMsg <- CommandMsg{
+		Args:   args,
+		Result: result,
+		Done:   done,
+	}
+	<-done
+	return nil
+}
+
+func (gateway *RPCGateway) AppendEntriesMsg() <-chan AppendEntriesMsg {
 	return gateway.appendEntriesMsg
 }
 
-func (gateway *RPCGateway) RequestVoteMsg() <-chan *RequestVoteMsg {
+func (gateway *RPCGateway) RequestVoteMsg() <-chan RequestVoteMsg {
 	return gateway.requestVoteMsg
 }
 
-func (gateway *RPCGateway) handleCommand(w http.ResponseWriter, r *http.Request) {
-	var input CommandInput
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		log.Fatal(err)
-	}
-
-}
-
-type CommandInput struct {
-	Command string
+func (gateway *RPCGateway) CommandMsg() <-chan CommandMsg {
+	return gateway.commandMsg
 }

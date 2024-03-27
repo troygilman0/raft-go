@@ -49,3 +49,18 @@ type RequestVoteResult struct {
 	Term        uint
 	VoteGranted bool
 }
+
+type CommandMsg struct {
+	Args   *CommandArgs
+	Result *CommandResult
+	Done   chan struct{}
+}
+
+type CommandArgs struct {
+	Command string
+}
+
+type CommandResult struct {
+	Success  bool
+	Redirect string
+}
