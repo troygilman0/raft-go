@@ -2,6 +2,7 @@ package raft
 
 import (
 	"log"
+	"net/http"
 	"sync"
 )
 
@@ -19,9 +20,11 @@ func NewDiscoveryService() *DiscoveryService {
 
 func (svc *DiscoveryService) Start(port string) {
 	log.Println("Starting Discovery Service...")
-	if err := serveRPC(svc, port); err != nil {
+	rpcServer, err := newRPCServer(svc)
+	if err != nil {
 		log.Fatal(err)
 	}
+	log.Fatal(http.ListenAndServe(":"+port, rpcServer))
 }
 
 func (svc *DiscoveryService) DiscoverRPC(args *DiscoverArgs, result *DiscoverResult) error {
