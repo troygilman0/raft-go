@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"errors"
 	"log"
 	"math/rand"
 	"time"
@@ -8,9 +9,10 @@ import (
 
 const (
 	minServersForElection    = 3
-	heartbeatTimeoutDuration = 50 * time.Millisecond
 	minElectionTimeoutMs     = 150
 	maxElectionTimeoutMs     = 300
+	heartbeatTimeoutMs       = 50
+	heartbeatTimeoutDuration = heartbeatTimeoutMs * time.Millisecond
 )
 
 type Server struct {
@@ -58,7 +60,7 @@ func (server *Server) Start(gateway Gateway) {
 		select {
 		case msg := <-gateway.CommandMsg():
 			// handle Command
-			server.handleCommand(msg)
+			server.handleCommand(msg, gateway)
 		case msg := <-gateway.AppendEntriesMsg():
 			// handle AppendEntries
 			server.handleExternalTerm(msg.args.Term)
@@ -72,7 +74,7 @@ func (server *Server) Start(gateway Gateway) {
 		case result := <-server.appendResultsChan:
 			// handle AppendEntries result
 			server.handleExternalTerm(result.Term)
-			server.HandleAppendEntriesResult(result)
+			server.handleAppendEntriesResult(result, gateway)
 		case result := <-server.voteResultsChan:
 			// handle RequestVote result
 			server.handleExternalTerm(result.Term)
@@ -82,7 +84,7 @@ func (server *Server) Start(gateway Gateway) {
 			server.heartbeatTimeout.Reset(heartbeatTimeoutDuration)
 			server.discover(gateway)
 			if server.id == server.leader {
-				server.sendAppendEntries(gateway)
+				server.sendAppendEntriesAll(gateway)
 			}
 		case <-server.electionTimeout.C:
 			// election timeout
@@ -200,50 +202,58 @@ func (server *Server) lastLogIndexAndTerm() (uint, uint) {
 	return lastLogIndex, lastLogTerm
 }
 
-func (server *Server) sendAppendEntries(gateway Gateway) {
-	log.Println(server.id, "- SendAppendEntries")
+func (server *Server) sendAppendEntries(id string, gateway Gateway) error {
+	info, ok := server.servers[id]
+	if !ok {
+		return errors.New("server does not exist")
+	}
 
+	if info.nextIndex == 0 {
+		return errors.New("nextIndex is 0 for " + info.id)
+	}
+
+	entries := []LogEntry{}
 	lastLogIndex, _ := server.lastLogIndexAndTerm()
+	if lastLogIndex >= info.nextIndex {
+		entries = server.log[info.nextIndex-1:]
+	}
 
-	for _, info := range server.servers {
-		entries := []LogEntry{}
+	var prevLogIndex uint = info.nextIndex - 1
+	var prevLogTerm uint = 0
+	if prevLogIndex > 0 {
+		prevLogTerm = server.log[prevLogIndex-1].Term
+	}
 
-		if info.nextIndex == 0 {
-			log.Println(server.id, "- Error: nextIndex is 0 for", info.id)
-			continue
+	args := &AppendEntriesArgs{
+		Term:         server.currentTerm,
+		LeaderId:     server.id,
+		PrevLogTerm:  prevLogTerm,
+		PrevLogIndex: prevLogIndex,
+		Entries:      entries,
+		LeaderCommit: server.commitIndex,
+	}
+
+	go func() {
+		result := &AppendEntriesResult{}
+		if err := gateway.AppendEntries(info.id, args, result); err != nil {
+			log.Println(err)
+			return
 		}
+		server.appendResultsChan <- result
+	}()
+	return nil
+}
 
-		if lastLogIndex >= info.nextIndex {
-			entries = server.log[info.nextIndex-1:]
+func (server *Server) sendAppendEntriesAll(gateway Gateway) {
+	log.Println(server.id, "- SendAppendEntries")
+	for id := range server.servers {
+		if err := server.sendAppendEntries(id, gateway); err != nil {
+			log.Println(server.id, "- Error while sending AppendEntries for ", id, "-", err.Error())
 		}
-
-		var prevLogIndex uint = info.nextIndex - 1
-		var prevLogTerm uint = 0
-		if prevLogIndex > 0 {
-			prevLogTerm = server.log[prevLogIndex-1].Term
-		}
-
-		args := &AppendEntriesArgs{
-			Term:         server.currentTerm,
-			LeaderId:     server.id,
-			PrevLogTerm:  prevLogTerm,
-			PrevLogIndex: prevLogIndex,
-			Entries:      entries,
-			LeaderCommit: server.commitIndex,
-		}
-
-		go func() {
-			result := &AppendEntriesResult{}
-			if err := gateway.AppendEntries(info.id, args, result); err != nil {
-				log.Println(err)
-				return
-			}
-			server.appendResultsChan <- result
-		}()
 	}
 }
 
-func (server *Server) HandleAppendEntriesResult(result *AppendEntriesResult) {
+func (server *Server) handleAppendEntriesResult(result *AppendEntriesResult, gateway Gateway) {
 	server.printLogResult("HandleAppendEntriesResult", result)
 	info := server.servers[result.Id]
 	if result.Success {
@@ -252,7 +262,9 @@ func (server *Server) HandleAppendEntriesResult(result *AppendEntriesResult) {
 		info.nextIndex = lastLogIndex + 1
 	} else {
 		info.nextIndex--
-		// should send AppendEntries for this specific server
+		if err := server.sendAppendEntries(info.id, gateway); err != nil {
+			log.Println(server.id, "- Error while sending AppendEntries for ", info.id, "-", err.Error())
+		}
 	}
 }
 
@@ -329,7 +341,7 @@ func (server *Server) handleRequestVoteResult(result *RequestVoteResult, gateway
 				info.nextIndex = lastLogIndex + 1
 				info.matchIndex = 0
 			}
-			server.sendAppendEntries(gateway)
+			server.sendAppendEntriesAll(gateway)
 		}
 	}
 }
@@ -358,7 +370,7 @@ func (server *Server) handleRequestVote(args *RequestVoteArgs, result *RequestVo
 	}
 }
 
-func (server *Server) handleCommand(msg CommandMsg) {
+func (server *Server) handleCommand(msg CommandMsg, gateway Gateway) {
 	defer func() {
 		server.printLogArgsResult("HandleCommand", msg.Args, msg.Result)
 	}()
@@ -370,6 +382,7 @@ func (server *Server) handleCommand(msg CommandMsg) {
 		})
 		newLogIndex := len(server.log)
 		server.pendingCommands[uint(newLogIndex)] = msg
+		server.sendAppendEntriesAll(gateway)
 	} else {
 		msg.Result.Success = false
 		msg.Result.Redirect = server.leader
