@@ -54,6 +54,7 @@ func sendRPC(name string, addr string, args any, result any) error {
 	if err != nil {
 		return err
 	}
+	defer client.Close()
 	return client.Call(name, args, result)
 }
 

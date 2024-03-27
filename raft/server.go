@@ -273,9 +273,13 @@ func (server *Server) handleAppendEntries(args *AppendEntriesArgs, result *Appen
 		server.commitIndex = min(args.LeaderCommit, newEntryIndex)
 	}
 
-	server.electionTimeout.Reset(newElectionTimoutDuration())
 	server.leader = args.LeaderId
 	result.Success = true
+
+	if !server.electionTimeout.Stop() {
+		<-server.electionTimeout.C
+	}
+	server.electionTimeout.Reset(newElectionTimoutDuration())
 }
 
 func (server *Server) handleRequestVoteResult(result *RequestVoteResult, gateway Gateway) {
