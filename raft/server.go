@@ -15,8 +15,13 @@ const (
 	heartbeatTimeoutDuration = heartbeatTimeoutMs * time.Millisecond
 )
 
+type ServerConfig struct {
+	Id    string
+	Debug bool
+}
+
 type Server struct {
-	id                string
+	config            ServerConfig
 	leader            string
 	currentTerm       uint
 	votedFor          string
@@ -30,11 +35,12 @@ type Server struct {
 	electionTimeout   *time.Timer
 	voteResultsChan   chan *RequestVoteResult
 	appendResultsChan chan *AppendEntriesResult
+	closeChan         chan struct{}
 }
 
-func NewServer(id string) *Server {
+func NewServer(config ServerConfig) *Server {
 	return &Server{
-		id:                id,
+		config:            config,
 		leader:            "",
 		currentTerm:       0,
 		votedFor:          "",
@@ -43,19 +49,21 @@ func NewServer(id string) *Server {
 		lastApplied:       0,
 		votes:             0,
 		servers:           make(map[string]*serverInfo),
-		pendingCommands:   make(map[uint]CommandMsg),
 		voteResultsChan:   make(chan *RequestVoteResult),
 		appendResultsChan: make(chan *AppendEntriesResult),
+		closeChan:         make(chan struct{}),
 	}
 }
 
 func (server *Server) Start(gateway Gateway) {
-	log.Println(server.id, "- Starting Raft Server")
+	log.Println(server.config.Id, "- Starting server")
 
+	server.pendingCommands = make(map[uint]CommandMsg)
 	server.heartbeatTimeout = time.NewTimer(heartbeatTimeoutDuration)
 	server.electionTimeout = time.NewTimer(newElectionTimoutDuration())
 
 	// main event loop
+eventLoop:
 	for {
 		select {
 		case msg := <-gateway.CommandMsg():
@@ -83,23 +91,65 @@ func (server *Server) Start(gateway Gateway) {
 			// heartbeat timeout
 			server.heartbeatTimeout.Reset(heartbeatTimeoutDuration)
 			server.discover(gateway)
-			if server.id == server.leader {
+			if server.config.Id == server.leader {
 				server.sendAppendEntriesAll(gateway)
 			}
 		case <-server.electionTimeout.C:
 			// election timeout
 			server.electionTimeout.Reset(newElectionTimoutDuration())
-			if server.id != server.leader {
+			if server.config.Id != server.leader {
 				server.startElection(gateway)
 			}
+		case <-server.closeChan:
+			break eventLoop
 		}
-
 		server.updateStateMachine()
 	}
+
+	log.Println(server.config.Id, "- Stopping server")
+	{ // reject all pending commands
+		log.Println(server.config.Id, "- Rejecting pending commands")
+		for _, msg := range server.pendingCommands {
+			log.Println(server.config.Id, "- Command failed:", msg.Args, "- Server is closing")
+			msg.Result.Success = false
+			msg.Done <- struct{}{}
+		}
+	}
+	{ // close gateway
+		log.Println(server.config.Id, "- Closing gateway")
+		if err := gateway.Close(); err != nil {
+			log.Println(server.config.Id, "- Error closing gateway:", err)
+		}
+	}
+	{ // flush channels
+		log.Println(server.config.Id, "- Flushing channels")
+	flushLoop:
+		for {
+			select {
+			case <-server.appendResultsChan:
+			case <-server.voteResultsChan:
+			default:
+				break flushLoop
+			}
+		}
+	}
+	{ // stop timers
+		if !server.heartbeatTimeout.Stop() {
+			<-server.heartbeatTimeout.C
+		}
+		if !server.electionTimeout.Stop() {
+			<-server.electionTimeout.C
+		}
+	}
+	log.Println(server.config.Id, "- Stopped Server Successfully")
+}
+
+func (server *Server) Close() {
+	server.closeChan <- struct{}{}
 }
 
 func (server *Server) updateStateMachine() {
-	for i := server.commitIndex + 1; i <= uint(len(server.log)); i++ {
+	for i := uint(len(server.log)); i >= server.commitIndex+1; i-- {
 		if server.log[i-1].Term == server.currentTerm {
 			matched := 0
 			for _, info := range server.servers {
@@ -109,10 +159,9 @@ func (server *Server) updateStateMachine() {
 			}
 			if float32(matched) > float32(len(server.servers))/2 {
 				server.commitIndex = i
-				continue
+				break
 			}
 		}
-		break
 	}
 	for server.commitIndex > server.lastApplied {
 		server.lastApplied++
@@ -120,6 +169,7 @@ func (server *Server) updateStateMachine() {
 		if ok {
 			commandMsg.Result.Success = true
 			commandMsg.Done <- struct{}{}
+			delete(server.pendingCommands, server.lastApplied)
 		}
 	}
 }
@@ -138,7 +188,7 @@ func newElectionTimoutDuration() time.Duration {
 
 func (server *Server) discover(gateway Gateway) {
 	args := &DiscoverArgs{
-		Id: server.id,
+		Id: server.config.Id,
 	}
 	result := &DiscoverResult{}
 	if err := gateway.Discover(args, result); err != nil {
@@ -159,13 +209,13 @@ func (server *Server) discover(gateway Gateway) {
 }
 
 func (server *Server) startElection(gateway Gateway) {
-	log.Println(server.id, "- Starting Election...")
+	log.Println(server.config.Id, "- Starting Election...")
 	server.currentTerm++
 	server.votes = 1
-	server.votedFor = server.id
+	server.votedFor = server.config.Id
 
 	if len(server.servers)+1 < minServersForElection {
-		log.Println(server.id, "- Not enough servers for election")
+		log.Println(server.config.Id, "- Not enough servers for election")
 		return
 	}
 
@@ -173,22 +223,20 @@ func (server *Server) startElection(gateway Gateway) {
 
 	args := &RequestVoteArgs{
 		Term:         server.currentTerm,
-		CandidateId:  server.id,
+		CandidateId:  server.config.Id,
 		LastLogIndex: lastLogIndex,
 		LastLogTerm:  lastLogTerm,
 	}
 
 	go func() {
 		for _, info := range server.servers {
-			go func() {
+			go func(id string) {
 				result := &RequestVoteResult{}
-				err := gateway.RequestVote(info.id, args, result)
-				if err != nil {
-					log.Println(err)
+				if err := gateway.RequestVote(id, args, result); err != nil {
 					return
 				}
 				server.voteResultsChan <- result
-			}()
+			}(info.id)
 		}
 	}()
 }
@@ -226,7 +274,7 @@ func (server *Server) sendAppendEntries(id string, gateway Gateway) error {
 
 	args := &AppendEntriesArgs{
 		Term:         server.currentTerm,
-		LeaderId:     server.id,
+		LeaderId:     server.config.Id,
 		PrevLogTerm:  prevLogTerm,
 		PrevLogIndex: prevLogIndex,
 		Entries:      entries,
@@ -236,7 +284,7 @@ func (server *Server) sendAppendEntries(id string, gateway Gateway) error {
 	go func() {
 		result := &AppendEntriesResult{}
 		if err := gateway.AppendEntries(info.id, args, result); err != nil {
-			log.Println(err)
+			log.Println(server.config.Id, "- SendAppendEntries", err)
 			return
 		}
 		server.appendResultsChan <- result
@@ -245,38 +293,43 @@ func (server *Server) sendAppendEntries(id string, gateway Gateway) error {
 }
 
 func (server *Server) sendAppendEntriesAll(gateway Gateway) {
-	log.Println(server.id, "- SendAppendEntries")
+	server.printLog("SendApendEntriesAll")
 	for id := range server.servers {
 		if err := server.sendAppendEntries(id, gateway); err != nil {
-			log.Println(server.id, "- Error while sending AppendEntries for ", id, "-", err.Error())
+			log.Println(server.config.Id, "- Error while sending AppendEntries for ", id, "-", err.Error())
 		}
 	}
 }
 
 func (server *Server) handleAppendEntriesResult(result *AppendEntriesResult, gateway Gateway) {
 	server.printLogResult("HandleAppendEntriesResult", result)
-	info := server.servers[result.Id]
+	info, ok := server.servers[result.Id]
+	if !ok {
+		return
+	}
 	if result.Success {
 		lastLogIndex, _ := server.lastLogIndexAndTerm()
 		info.matchIndex = info.nextIndex - 1
 		info.nextIndex = lastLogIndex + 1
 	} else {
-		info.nextIndex--
+		if info.nextIndex > 1 {
+			info.nextIndex--
+		}
 		if err := server.sendAppendEntries(info.id, gateway); err != nil {
-			log.Println(server.id, "- Error while sending AppendEntries for ", info.id, "-", err.Error())
+			log.Println(server.config.Id, "- Error while sending AppendEntries for ", info.id, "-", err.Error())
 		}
 	}
 }
 
 func (server *Server) handleAppendEntries(args *AppendEntriesArgs, result *AppendEntriesResult) {
 	defer func() {
-		result.Id = server.id
+		result.Id = server.config.Id
 		result.Term = server.currentTerm
 		server.printLogArgsResult("HandleAppendEntries", args, result)
 	}()
 
-	if args.Term == server.currentTerm && server.leader == server.id {
-		log.Println(server.id, "- Leader Collision!!!")
+	if args.Term == server.currentTerm && server.leader == server.config.Id {
+		log.Println(server.config.Id, "- Leader Collision!!!")
 	}
 
 	// Condition #1
@@ -331,11 +384,11 @@ func (server *Server) handleAppendEntries(args *AppendEntriesArgs, result *Appen
 
 func (server *Server) handleRequestVoteResult(result *RequestVoteResult, gateway Gateway) {
 	server.printLogResult("HandleRequestVoteResult", result)
-	if result.VoteGranted && result.Term == server.currentTerm {
+	if result.VoteGranted && result.Term == server.currentTerm && server.leader != server.config.Id {
 		server.votes++
 		if float32(server.votes)/float32(len(server.servers)) > 0.5 {
-			log.Println(server.id, "- Promoted to leader")
-			server.leader = server.id
+			log.Println(server.config.Id, "- Promoted to leader")
+			server.leader = server.config.Id
 			lastLogIndex, _ := server.lastLogIndexAndTerm()
 			for _, info := range server.servers {
 				info.nextIndex = lastLogIndex + 1
@@ -375,7 +428,7 @@ func (server *Server) handleCommand(msg CommandMsg, gateway Gateway) {
 		server.printLogArgsResult("HandleCommand", msg.Args, msg.Result)
 	}()
 
-	if server.id == server.leader {
+	if server.config.Id == server.leader {
 		server.log = append(server.log, LogEntry{
 			Command: msg.Args.Command,
 			Term:    server.currentTerm,
@@ -391,9 +444,19 @@ func (server *Server) handleCommand(msg CommandMsg, gateway Gateway) {
 }
 
 func (server *Server) printLogArgsResult(action string, args any, result any) {
-	log.Printf("%s - %s Args:%+v Result:%+v", server.id, action, args, result)
+	if server.config.Debug {
+		log.Printf("%s - %s Args:%+v Result:%+v", server.config.Id, action, args, result)
+	}
 }
 
 func (server *Server) printLogResult(action string, result any) {
-	log.Printf("%s - %s Result:%+v", server.id, action, result)
+	if server.config.Debug {
+		log.Printf("%s - %s Result:%+v", server.config.Id, action, result)
+	}
+}
+
+func (server *Server) printLog(msg string) {
+	if server.config.Debug {
+		log.Println(server.config.Id, "-", msg)
+	}
 }

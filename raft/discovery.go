@@ -3,10 +3,13 @@ package raft
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/rpc"
 	"sync"
+	"time"
 )
 
 type DiscoveryService struct {
@@ -68,10 +71,7 @@ func (svc *DiscoveryService) handleCommand(w http.ResponseWriter, r *http.Reques
 
 		// find a possible leader
 		if svc.leader == "" {
-			for server := range svc.servers {
-				svc.leader = server
-				break
-			}
+			svc.leader = svc.getRandomServer()
 			if svc.leader == "" {
 				return errors.New("no servers have been registered")
 			}
@@ -83,22 +83,34 @@ func (svc *DiscoveryService) handleCommand(w http.ResponseWriter, r *http.Reques
 		result := &CommandResult{}
 
 		// make rpc calls until we find the leader and apply the command
-		addr := svc.leader
 		for {
-			client, err := rpc.DialHTTPPath("tcp", addr, "/rpc")
+			client, err := rpc.DialHTTPPath("tcp", svc.leader, "/rpc")
 			if err != nil {
-				return err
+				log.Println("DiscoveryService -", err.Error())
+				svc.leader = svc.getRandomServer()
+				continue
 			}
 
-			if err := client.Call("RPCGateway.CommandRPC", args, result); err != nil {
-				return err
+			{ // make call with cliennt
+				timeout := time.NewTimer(rpcTimeoutDuration)
+				call := client.Go("RPCGateway.CommandRPC", args, result, nil)
+				select {
+				case <-call.Done:
+					err = call.Error
+				case <-timeout.C:
+					err = errors.New("rpc timed out")
+				}
+				if err != nil {
+					client.Close()
+					return fmt.Errorf("calling %s - %s", svc.leader, err.Error())
+				}
 			}
 
 			if result.Success {
 				break
 			} else {
 				if result.Redirect != "" {
-					addr = result.Redirect
+					svc.leader = result.Redirect
 				} else {
 					return errors.New("command could not be applied")
 				}
@@ -108,9 +120,22 @@ func (svc *DiscoveryService) handleCommand(w http.ResponseWriter, r *http.Reques
 	}()
 
 	if err != nil {
-		log.Println(err.Error())
+		log.Println("DiscoveryService -", err.Error())
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func (svc *DiscoveryService) getRandomServer() string {
+	svc.mutex.Lock()
+	defer svc.mutex.Unlock()
+	k := rand.Intn(len(svc.servers))
+	for server := range svc.servers {
+		if k == 0 {
+			return server
+		}
+		k--
+	}
+	return ""
 }
 
 type CommandInput struct {

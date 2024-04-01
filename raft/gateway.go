@@ -6,6 +6,11 @@ import (
 	"net/http"
 	"net/rpc"
 	"sync"
+	"time"
+)
+
+const (
+	rpcTimeoutDuration = 100 * time.Millisecond
 )
 
 type Gateway interface {
@@ -15,17 +20,19 @@ type Gateway interface {
 	AppendEntriesMsg() <-chan AppendEntriesMsg
 	RequestVoteMsg() <-chan RequestVoteMsg
 	CommandMsg() <-chan CommandMsg
+	Close() error
 }
 
 func NewRPCGateway(port string, discoveryAddr string) Gateway {
 	gateway := &RPCGateway{
-		port:             port,
+		httpServer:       &http.Server{Addr: ":" + port},
 		discoveryAddr:    discoveryAddr,
 		clients:          sync.Map{},
 		appendEntriesMsg: make(chan AppendEntriesMsg),
 		requestVoteMsg:   make(chan RequestVoteMsg),
 		commandMsg:       make(chan CommandMsg),
 	}
+	log.Println("Starting RPCGateway on port", port)
 	go func() {
 		rpcServer, err := newRPCServer(gateway)
 		if err != nil {
@@ -33,13 +40,16 @@ func NewRPCGateway(port string, discoveryAddr string) Gateway {
 		}
 		mux := http.NewServeMux()
 		mux.Handle("/rpc", rpcServer)
-		log.Fatal(http.ListenAndServe(":"+port, mux))
+		gateway.httpServer.Handler = mux
+		if err := gateway.httpServer.ListenAndServe(); err != http.ErrServerClosed {
+			log.Fatalf("ListenAndServe(): %v", err)
+		}
 	}()
 	return gateway
 }
 
 type RPCGateway struct {
-	port             string
+	httpServer       *http.Server
 	discoveryAddr    string
 	clients          sync.Map
 	appendEntriesMsg chan AppendEntriesMsg
@@ -56,29 +66,40 @@ func newRPCServer(handler any) (*rpc.Server, error) {
 }
 
 func (gateway *RPCGateway) sendRPC(name string, addr string, args any, result any) error {
-	clientAny, ok := gateway.clients.Load(addr)
 	var client *rpc.Client
-	if ok {
-		client, ok = clientAny.(*rpc.Client)
-		if !ok {
-			return errors.New("client cache returned something other than *rpc.Client")
+	{ // find or create a client
+		clientAny, ok := gateway.clients.Load(addr)
+		if ok {
+			client, ok = clientAny.(*rpc.Client)
+			if !ok {
+				return errors.New("client cache returned something other than *rpc.Client")
+			}
+		} else {
+			var err error
+			client, err = rpc.DialHTTPPath("tcp", addr, "/rpc")
+			if err != nil {
+				return err
+			}
+			gateway.clients.Store(addr, client)
 		}
-	} else {
-		var err error
-		client, err = rpc.DialHTTPPath("tcp", addr, "/rpc")
+	}
+
+	var err error
+	{ // make call with client
+		timeout := time.NewTimer(rpcTimeoutDuration)
+		call := client.Go(name, args, result, nil)
+		select {
+		case <-call.Done:
+			err = call.Error
+		case <-timeout.C:
+			err = errors.New("rpc timed out")
+		}
 		if err != nil {
-			return err
+			client.Close()
+			gateway.clients.Delete(addr)
 		}
-		gateway.clients.Store(addr, client)
 	}
-	if err := client.Call(name, args, result); err != nil {
-		if err := client.Close(); err != nil {
-			log.Println(err)
-		}
-		gateway.clients.Delete(addr)
-		return err
-	}
-	return nil
+	return err
 }
 
 func (gateway *RPCGateway) Discover(args *DiscoverArgs, result *DiscoverResult) error {
@@ -136,4 +157,37 @@ func (gateway *RPCGateway) RequestVoteMsg() <-chan RequestVoteMsg {
 
 func (gateway *RPCGateway) CommandMsg() <-chan CommandMsg {
 	return gateway.commandMsg
+}
+
+func (gateway *RPCGateway) Close() error {
+	{ // close clients
+		gateway.clients.Range(func(key, value any) bool {
+			client, ok := value.(*rpc.Client)
+			if ok {
+				client.Close()
+			}
+			return true
+		})
+	}
+	{ // close http server
+		if err := gateway.httpServer.Close(); err != nil {
+			return err
+		}
+	}
+	{ // flush channels
+	flushLoop:
+		for {
+			select {
+			case msg := <-gateway.appendEntriesMsg:
+				msg.done <- struct{}{}
+			case msg := <-gateway.requestVoteMsg:
+				msg.done <- struct{}{}
+			case msg := <-gateway.commandMsg:
+				msg.Done <- struct{}{}
+			default:
+				break flushLoop
+			}
+		}
+	}
+	return nil
 }

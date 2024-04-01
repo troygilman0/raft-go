@@ -23,6 +23,10 @@ func main() {
 	if discovery {
 		raft.NewDiscoveryService().Start(port)
 	} else {
-		raft.NewServer(hostname + ":" + port).Start(raft.NewRPCGateway(port, discoveryHostname+":"+port))
+		config := raft.ServerConfig{
+			Id:    hostname + ":" + port,
+			Debug: true,
+		}
+		raft.NewServer(config).Start(raft.NewRPCGateway(port, discoveryHostname+":"+port))
 	}
 }
