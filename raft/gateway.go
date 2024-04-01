@@ -2,7 +2,6 @@ package raft
 
 import (
 	"errors"
-	"log"
 	"net/http"
 	"net/rpc"
 	"sync"
@@ -20,11 +19,12 @@ type Gateway interface {
 	AppendEntriesMsg() <-chan AppendEntriesMsg
 	RequestVoteMsg() <-chan RequestVoteMsg
 	CommandMsg() <-chan CommandMsg
+	Start() error
 	Close() error
 }
 
 func NewRPCGateway(port string, discoveryAddr string) Gateway {
-	gateway := &RPCGateway{
+	return &RPCGateway{
 		httpServer:       &http.Server{Addr: ":" + port},
 		discoveryAddr:    discoveryAddr,
 		clients:          sync.Map{},
@@ -32,20 +32,6 @@ func NewRPCGateway(port string, discoveryAddr string) Gateway {
 		requestVoteMsg:   make(chan RequestVoteMsg),
 		commandMsg:       make(chan CommandMsg),
 	}
-	log.Println("Starting RPCGateway on port", port)
-	go func() {
-		rpcServer, err := newRPCServer(gateway)
-		if err != nil {
-			log.Fatal(err)
-		}
-		mux := http.NewServeMux()
-		mux.Handle("/rpc", rpcServer)
-		gateway.httpServer.Handler = mux
-		if err := gateway.httpServer.ListenAndServe(); err != http.ErrServerClosed {
-			log.Fatalf("ListenAndServe(): %v", err)
-		}
-	}()
-	return gateway
 }
 
 type RPCGateway struct {
@@ -55,6 +41,20 @@ type RPCGateway struct {
 	appendEntriesMsg chan AppendEntriesMsg
 	requestVoteMsg   chan RequestVoteMsg
 	commandMsg       chan CommandMsg
+}
+
+func (gateway *RPCGateway) Start() error {
+	rpcServer, err := newRPCServer(gateway)
+	if err != nil {
+		return err
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/rpc", rpcServer)
+	gateway.httpServer.Handler = mux
+	if err := gateway.httpServer.ListenAndServe(); err != http.ErrServerClosed {
+		return err
+	}
+	return nil
 }
 
 func newRPCServer(handler any) (*rpc.Server, error) {

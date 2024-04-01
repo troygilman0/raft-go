@@ -1,6 +1,8 @@
 package raft
 
 import (
+	"log"
+	"log/slog"
 	"math/rand"
 	"strconv"
 	"testing"
@@ -12,15 +14,19 @@ func TestBasic(t *testing.T) {
 	discoveryPort := 8000
 	discoveryAddr := "localhost:" + strconv.Itoa(discoveryPort)
 
-	go NewDiscoveryService().Start(strconv.Itoa(discoveryPort))
+	go func() {
+		if err := NewDiscoveryService().Start(strconv.Itoa(discoveryPort)); err != nil {
+			log.Fatal(err)
+		}
+	}()
 
 	servers := make([]*Server, numServers)
 	for i := range numServers {
 		port := discoveryPort + i + 1
 		portStr := strconv.Itoa(port)
 		config := ServerConfig{
-			Id:    "localhost:" + portStr,
-			Debug: true,
+			Id:     "localhost:" + portStr,
+			Logger: slog.Default(),
 		}
 		servers[i] = NewServer(config)
 		go servers[i].Start(NewRPCGateway(portStr, discoveryAddr))

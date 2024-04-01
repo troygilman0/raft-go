@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"net/rpc"
@@ -25,16 +25,19 @@ func NewDiscoveryService() *DiscoveryService {
 	}
 }
 
-func (svc *DiscoveryService) Start(port string) {
-	log.Println("Starting Discovery Service...")
+func (svc *DiscoveryService) Start(port string) error {
+	slog.Info("Starting discovery service")
 	rpcServer, err := newRPCServer(svc)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/rpc", rpcServer)
 	mux.HandleFunc("/command", svc.handleCommand)
-	log.Fatal(http.ListenAndServe(":"+port, mux))
+	if err := http.ListenAndServe(":"+port, mux); err != http.ErrServerClosed {
+		return err
+	}
+	return nil
 }
 
 func (svc *DiscoveryService) DiscoverRPC(args *DiscoverArgs, result *DiscoverResult) error {
@@ -61,7 +64,7 @@ type DiscoverResult struct {
 
 func (svc *DiscoveryService) handleCommand(w http.ResponseWriter, r *http.Request) {
 	err := func() error {
-		log.Println("HandleCommand")
+		slog.Info("handleCommand()")
 
 		// decode input
 		var input CommandInput
@@ -86,7 +89,6 @@ func (svc *DiscoveryService) handleCommand(w http.ResponseWriter, r *http.Reques
 		for {
 			client, err := rpc.DialHTTPPath("tcp", svc.leader, "/rpc")
 			if err != nil {
-				log.Println("DiscoveryService -", err.Error())
 				svc.leader = svc.getRandomServer()
 				continue
 			}
@@ -120,7 +122,7 @@ func (svc *DiscoveryService) handleCommand(w http.ResponseWriter, r *http.Reques
 	}()
 
 	if err != nil {
-		log.Println("DiscoveryService -", err.Error())
+		slog.Error("handleCommand()", "error", err.Error())
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
