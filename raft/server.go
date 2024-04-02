@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/rand"
+	"sync"
 	"time"
 )
 
@@ -36,6 +37,8 @@ type Server struct {
 	voteResultsChan   chan *RequestVoteResult
 	appendResultsChan chan *AppendEntriesResult
 	closeChan         chan struct{}
+	running           bool
+	runningMutex      sync.Mutex
 }
 
 func NewServer(config ServerConfig) *Server {
@@ -61,8 +64,13 @@ func (server *Server) Start(gateway Gateway) {
 	go func() {
 		if err := gateway.Start(); err != nil {
 			server.slog(slog.LevelError, "Starting gateway", "error", err.Error())
+			server.Close()
 		}
 	}()
+
+	server.runningMutex.Lock()
+	server.running = true
+	server.runningMutex.Unlock()
 
 	server.pendingCommands = make(map[uint]CommandMsg)
 	server.heartbeatTimeout = time.NewTimer(heartbeatTimeoutDuration)
@@ -113,6 +121,11 @@ eventLoop:
 	}
 
 	server.slog(slog.LevelInfo, "Stopping server")
+	{ // set running to false
+		server.runningMutex.Lock()
+		server.running = false
+		server.runningMutex.Unlock()
+	}
 	{ // reject all pending commands
 		server.slog(slog.LevelInfo, "Rejecting pending commands")
 		for index, msg := range server.pendingCommands {
@@ -134,6 +147,7 @@ eventLoop:
 			select {
 			case <-server.appendResultsChan:
 			case <-server.voteResultsChan:
+			case <-server.closeChan:
 			default:
 				break flushLoop
 			}
@@ -151,7 +165,11 @@ eventLoop:
 }
 
 func (server *Server) Close() {
-	server.closeChan <- struct{}{}
+	server.runningMutex.Lock()
+	defer server.runningMutex.Unlock()
+	if server.running {
+		server.closeChan <- struct{}{}
+	}
 }
 
 func (server *Server) updateStateMachine() {
@@ -176,6 +194,7 @@ func (server *Server) updateStateMachine() {
 			commandMsg.Result.Success = true
 			commandMsg.Done <- struct{}{}
 			delete(server.pendingCommands, server.lastApplied)
+			server.slog(slog.LevelInfo, "Applied command", "index", server.lastApplied)
 		}
 	}
 }

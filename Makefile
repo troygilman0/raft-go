@@ -3,7 +3,8 @@ docker:
 	docker-compose up --build --scale node=5
 
 dev:
-	go run .
+	@go run .
 
 test:
-	go test -v ./raft
+	@go clean -testcache
+	@go test -v ./raft

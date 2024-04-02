@@ -114,7 +114,7 @@ func (svc *DiscoveryService) handleCommand(w http.ResponseWriter, r *http.Reques
 				if result.Redirect != "" {
 					svc.leader = result.Redirect
 				} else {
-					return errors.New("command could not be applied")
+					svc.leader = svc.getRandomServer()
 				}
 			}
 		}
