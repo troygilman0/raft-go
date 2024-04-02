@@ -17,8 +17,9 @@ const (
 )
 
 type ServerConfig struct {
-	Id     string
-	Logger *slog.Logger
+	Id      string
+	Handler CommandHandler
+	Logger  *slog.Logger
 }
 
 type Server struct {
@@ -189,13 +190,16 @@ func (server *Server) updateStateMachine() {
 	}
 	for server.commitIndex > server.lastApplied {
 		server.lastApplied++
+		if server.config.Handler != nil {
+			server.config.Handler(server.log[server.lastApplied-1].Command)
+		}
 		commandMsg, ok := server.pendingCommands[server.lastApplied]
 		if ok {
 			commandMsg.Result.Success = true
 			commandMsg.Done <- struct{}{}
 			delete(server.pendingCommands, server.lastApplied)
-			server.slog(slog.LevelInfo, "Applied command", "index", server.lastApplied)
 		}
+		server.slog(slog.LevelInfo, "Applied command", "index", server.lastApplied)
 	}
 }
 

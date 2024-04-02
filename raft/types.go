@@ -1,5 +1,7 @@
 package raft
 
+type CommandHandler func(command string)
+
 type serverInfo struct {
 	id         string
 	nextIndex  uint

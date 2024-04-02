@@ -8,8 +8,11 @@ import (
 	"math/rand"
 	"net/http"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestBasic(t *testing.T) {
@@ -29,20 +32,39 @@ func TestBasic(t *testing.T) {
 		}
 	}()
 
+	serverCommands := make([][]string, numServers)
+	serverHandlers := make([]CommandHandler, numServers)
 	servers := make([]*Server, numServers)
-	for i := range numServers {
-		port := discoveryPort + i + 1
+
+	startServerFunc := func(index int) {
+		port := discoveryPort + index + 1
 		portStr := strconv.Itoa(port)
-		config := ServerConfig{
-			Id:     "localhost:" + portStr,
-			Logger: logger,
+		servers[index] = NewServer(ServerConfig{
+			Id:      "localhost:" + portStr,
+			Handler: serverHandlers[index],
+			Logger:  logger,
+		})
+		go servers[index].Start(NewRPCGateway(portStr, discoveryAddr))
+		log.Println("Started server at index", index)
+	}
+
+	for i := range numServers {
+		{ // setup CommandHandler
+			serverCommands[i] = make([]string, 0)
+			logMutex := sync.Mutex{}
+			serverHandlers[i] = func(command string) {
+				logMutex.Lock()
+				defer logMutex.Unlock()
+				serverCommands[i] = append(serverCommands[i], command)
+				log.Println("test")
+			}
 		}
-		servers[i] = NewServer(config)
-		go servers[i].Start(NewRPCGateway(portStr, discoveryAddr))
+		startServerFunc(i)
 	}
 	time.Sleep(time.Second)
 
 	crashedServerIndex := -1
+	expectedCommands := make([]string, 0)
 	testTimeout := time.NewTimer(testTimeoutDuration)
 	sendCommandTimeout := time.NewTimer(sendCommandTimeoutDuration)
 	crashServerTimeout := time.NewTimer(crashServerTimeoutDuration)
@@ -51,10 +73,13 @@ testLoop:
 	for {
 		select {
 		case <-testTimeout.C:
+			if crashedServerIndex >= 0 {
+				startServerFunc(crashedServerIndex)
+			}
 			break testLoop
 		case <-sendCommandTimeout.C:
 			input := CommandInput{
-				Command: "Hello world",
+				Command: "Hello world: " + strconv.Itoa(len(expectedCommands)),
 			}
 			buffer, err := json.Marshal(&input)
 			if err != nil {
@@ -67,26 +92,27 @@ testLoop:
 			if resp.StatusCode != http.StatusOK {
 				t.Fatalf("invalid status code of command post: %d", resp.StatusCode)
 			}
+			expectedCommands = append(expectedCommands, input.Command)
 			sendCommandTimeout.Reset(sendCommandTimeoutDuration)
 		case <-crashServerTimeout.C:
 			if crashedServerIndex >= 0 {
-				port := discoveryPort + crashedServerIndex + 1
-				portStr := strconv.Itoa(port)
-				servers[crashedServerIndex] = NewServer(ServerConfig{
-					Id:     "localhost:" + portStr,
-					Logger: logger,
-				})
-				go servers[crashedServerIndex].Start(NewRPCGateway(portStr, discoveryAddr))
+				startServerFunc(crashedServerIndex)
 			}
 			i := rand.Intn(numServers)
 			servers[i].Close()
 			crashedServerIndex = i
 			crashServerTimeout.Reset(crashServerTimeoutDuration)
+			log.Println("Crashed server at index", i)
 		}
 	}
 
+	time.Sleep(time.Second)
 	for i := range numServers {
 		servers[i].Close()
 		log.Println("Closed server at index", i)
+	}
+
+	for _, commands := range serverCommands {
+		assert.Equal(t, expectedCommands, commands)
 	}
 }
