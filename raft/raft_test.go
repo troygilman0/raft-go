@@ -3,6 +3,7 @@ package raft
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log"
 	"log/slog"
 	"math/rand"
@@ -20,11 +21,11 @@ func TestBasic(t *testing.T) {
 		numServers                 = 5
 		discoveryPort              = 8000
 		testTimeoutDuration        = 10 * time.Second
-		sendCommandTimeoutDuration = 10 * time.Millisecond
+		sendCommandTimeoutDuration = 100 * time.Millisecond
 		crashServerTimeoutDuration = time.Second
 	)
 	discoveryAddr := "localhost:" + strconv.Itoa(discoveryPort)
-	var logger *slog.Logger = nil
+	var logger *slog.Logger = slog.Default()
 
 	go func() {
 		if err := NewDiscoveryService().Start(strconv.Itoa(discoveryPort)); err != nil {
@@ -68,6 +69,7 @@ func TestBasic(t *testing.T) {
 	testTimeout := time.NewTimer(testTimeoutDuration)
 	sendCommandTimeout := time.NewTimer(sendCommandTimeoutDuration)
 	crashServerTimeout := time.NewTimer(crashServerTimeoutDuration)
+	errChan := make(chan error)
 
 testLoop:
 	for {
@@ -82,18 +84,21 @@ testLoop:
 			input := CommandInput{
 				Command: "Hello world: " + strconv.Itoa(len(expectedCommands)),
 			}
+			expectedCommands = append(expectedCommands, input.Command)
 			buffer, err := json.Marshal(&input)
 			if err != nil {
 				t.Fatal(err)
 			}
-			resp, err := http.Post("http://"+discoveryAddr+"/command", "application/json", bytes.NewReader(buffer))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if resp.StatusCode != http.StatusOK {
-				t.Fatalf("invalid status code of command post: %d", resp.StatusCode)
-			}
-			expectedCommands = append(expectedCommands, input.Command)
+			go func() {
+				resp, err := http.Post("http://"+discoveryAddr+"/command", "application/json", bytes.NewReader(buffer))
+				if err != nil {
+					errChan <- err
+					return
+				}
+				if resp.StatusCode != http.StatusOK {
+					errChan <- fmt.Errorf("invalid status code of command post: %d", resp.StatusCode)
+				}
+			}()
 		case <-crashServerTimeout.C:
 			crashServerTimeout.Reset(crashServerTimeoutDuration)
 			if crashedServerIndex >= 0 {
@@ -105,6 +110,8 @@ testLoop:
 			}
 			servers[i].Close()
 			crashedServerIndex = i
+		case err := <-errChan:
+			t.Fatal(err)
 		}
 	}
 

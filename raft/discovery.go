@@ -93,7 +93,7 @@ func (svc *DiscoveryService) handleCommand(w http.ResponseWriter, r *http.Reques
 				continue
 			}
 
-			{ // make call with cliennt
+			{ // make call with client
 				timeout := time.NewTimer(rpcTimeoutDuration)
 				call := client.Go("RPCGateway.CommandRPC", args, result, nil)
 				select {

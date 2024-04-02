@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	rpcTimeoutDuration = 100 * time.Millisecond
+	rpcTimeoutDuration = 200 * time.Millisecond
 )
 
 type Gateway interface {
