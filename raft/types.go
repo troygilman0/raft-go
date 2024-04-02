@@ -2,6 +2,14 @@ package raft
 
 type CommandHandler func(command string)
 
+type serverState uint
+
+const (
+	serverStateClosed = iota
+	serverStateRunning
+	serverStateClosing
+)
+
 type serverInfo struct {
 	id         string
 	nextIndex  uint

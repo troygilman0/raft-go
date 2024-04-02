@@ -20,7 +20,7 @@ func TestBasic(t *testing.T) {
 		numServers                 = 5
 		discoveryPort              = 8000
 		testTimeoutDuration        = 10 * time.Second
-		sendCommandTimeoutDuration = 100 * time.Millisecond
+		sendCommandTimeoutDuration = 10 * time.Millisecond
 		crashServerTimeoutDuration = time.Second
 	)
 	discoveryAddr := "localhost:" + strconv.Itoa(discoveryPort)
@@ -36,16 +36,17 @@ func TestBasic(t *testing.T) {
 	serverHandlers := make([]CommandHandler, numServers)
 	servers := make([]*Server, numServers)
 
-	startServerFunc := func(index int) {
+	startServerFunc := func(index int, new bool) {
 		port := discoveryPort + index + 1
 		portStr := strconv.Itoa(port)
-		servers[index] = NewServer(ServerConfig{
-			Id:      "localhost:" + portStr,
-			Handler: serverHandlers[index],
-			Logger:  logger,
-		})
+		if new {
+			servers[index] = NewServer(ServerConfig{
+				Id:      "localhost:" + portStr,
+				Handler: serverHandlers[index],
+				Logger:  logger,
+			})
+		}
 		go servers[index].Start(NewRPCGateway(portStr, discoveryAddr))
-		log.Println("Started server at index", index)
 	}
 
 	for i := range numServers {
@@ -56,10 +57,9 @@ func TestBasic(t *testing.T) {
 				logMutex.Lock()
 				defer logMutex.Unlock()
 				serverCommands[i] = append(serverCommands[i], command)
-				log.Println("test")
 			}
 		}
-		startServerFunc(i)
+		startServerFunc(i, true)
 	}
 	time.Sleep(time.Second)
 
@@ -74,10 +74,11 @@ testLoop:
 		select {
 		case <-testTimeout.C:
 			if crashedServerIndex >= 0 {
-				startServerFunc(crashedServerIndex)
+				startServerFunc(crashedServerIndex, false)
 			}
 			break testLoop
 		case <-sendCommandTimeout.C:
+			sendCommandTimeout.Reset(sendCommandTimeoutDuration)
 			input := CommandInput{
 				Command: "Hello world: " + strconv.Itoa(len(expectedCommands)),
 			}
@@ -93,23 +94,23 @@ testLoop:
 				t.Fatalf("invalid status code of command post: %d", resp.StatusCode)
 			}
 			expectedCommands = append(expectedCommands, input.Command)
-			sendCommandTimeout.Reset(sendCommandTimeoutDuration)
 		case <-crashServerTimeout.C:
+			crashServerTimeout.Reset(crashServerTimeoutDuration)
 			if crashedServerIndex >= 0 {
-				startServerFunc(crashedServerIndex)
+				startServerFunc(crashedServerIndex, false)
 			}
-			i := rand.Intn(numServers)
+			i := crashedServerIndex
+			for i == crashedServerIndex {
+				i = rand.Intn(numServers)
+			}
 			servers[i].Close()
 			crashedServerIndex = i
-			crashServerTimeout.Reset(crashServerTimeoutDuration)
-			log.Println("Crashed server at index", i)
 		}
 	}
 
 	time.Sleep(time.Second)
 	for i := range numServers {
 		servers[i].Close()
-		log.Println("Closed server at index", i)
 	}
 
 	for _, commands := range serverCommands {

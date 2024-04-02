@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"log/slog"
 	"os"
 
 	"github.com/troygilman0/raft-go/raft"
@@ -24,8 +25,8 @@ func main() {
 		raft.NewDiscoveryService().Start(port)
 	} else {
 		config := raft.ServerConfig{
-			Id:    hostname + ":" + port,
-			Debug: true,
+			Id:     hostname + ":" + port,
+			Logger: slog.Default(),
 		}
 		raft.NewServer(config).Start(raft.NewRPCGateway(port, discoveryHostname+":"+port))
 	}

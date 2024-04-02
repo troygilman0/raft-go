@@ -38,8 +38,8 @@ type Server struct {
 	voteResultsChan   chan *RequestVoteResult
 	appendResultsChan chan *AppendEntriesResult
 	closeChan         chan struct{}
-	running           bool
-	runningMutex      sync.Mutex
+	state             serverState
+	stateMutex        sync.Mutex
 }
 
 func NewServer(config ServerConfig) *Server {
@@ -60,6 +60,13 @@ func NewServer(config ServerConfig) *Server {
 }
 
 func (server *Server) Start(gateway Gateway) {
+	server.stateMutex.Lock()
+	if server.state != serverStateClosed {
+		return
+	}
+	server.state = serverStateRunning
+	server.stateMutex.Unlock()
+
 	server.slog(slog.LevelInfo, "Starting Server")
 
 	go func() {
@@ -69,10 +76,7 @@ func (server *Server) Start(gateway Gateway) {
 		}
 	}()
 
-	server.runningMutex.Lock()
-	server.running = true
-	server.runningMutex.Unlock()
-
+	server.leader = ""
 	server.pendingCommands = make(map[uint]CommandMsg)
 	server.heartbeatTimeout = time.NewTimer(heartbeatTimeoutDuration)
 	server.electionTimeout = time.NewTimer(newElectionTimoutDuration())
@@ -116,17 +120,16 @@ eventLoop:
 				server.startElection(gateway)
 			}
 		case <-server.closeChan:
+			// set state to closing
+			server.stateMutex.Lock()
+			server.state = serverStateClosing
+			server.stateMutex.Unlock()
 			break eventLoop
 		}
 		server.updateStateMachine()
 	}
 
 	server.slog(slog.LevelInfo, "Stopping server")
-	{ // set running to false
-		server.runningMutex.Lock()
-		server.running = false
-		server.runningMutex.Unlock()
-	}
 	{ // reject all pending commands
 		server.slog(slog.LevelInfo, "Rejecting pending commands")
 		for index, msg := range server.pendingCommands {
@@ -162,29 +165,36 @@ eventLoop:
 			<-server.electionTimeout.C
 		}
 	}
+	{ // set state to closed
+		server.stateMutex.Lock()
+		server.state = serverStateClosed
+		server.stateMutex.Unlock()
+	}
 	server.slog(slog.LevelInfo, "Stopped server successfully")
 }
 
 func (server *Server) Close() {
-	server.runningMutex.Lock()
-	defer server.runningMutex.Unlock()
-	if server.running {
+	server.stateMutex.Lock()
+	defer server.stateMutex.Unlock()
+	if server.state == serverStateRunning {
 		server.closeChan <- struct{}{}
 	}
 }
 
 func (server *Server) updateStateMachine() {
-	for i := uint(len(server.log)); i >= server.commitIndex+1; i-- {
-		if server.log[i-1].Term == server.currentTerm {
-			matched := 0
-			for _, info := range server.servers {
-				if info.matchIndex >= i {
-					matched++
+	if server.leader == server.config.Id {
+		for i := uint(len(server.log)); i >= server.commitIndex+1; i-- {
+			if server.log[i-1].Term == server.currentTerm {
+				matched := 0
+				for _, info := range server.servers {
+					if info.matchIndex >= i {
+						matched++
+					}
 				}
-			}
-			if float32(matched) > float32(len(server.servers))/2 {
-				server.commitIndex = i
-				break
+				if float32(matched) > float32(len(server.servers))/2 {
+					server.commitIndex = i
+					break
+				}
 			}
 		}
 	}
@@ -379,9 +389,9 @@ func (server *Server) handleAppendEntries(args *AppendEntriesArgs, result *Appen
 		}
 	}
 
-	var newEntryIndex uint
-	for relativeIndex, entry := range args.Entries {
-		newEntryIndex = args.PrevLogIndex + uint(relativeIndex) + 1
+	newEntryIndex := args.PrevLogIndex
+	for _, entry := range args.Entries {
+		newEntryIndex++
 
 		// Condition #3
 		// If an existing entry conflicts with a new one (same index but different terms),
