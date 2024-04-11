@@ -27,7 +27,7 @@ func NewRPCGateway(port string, discoveryAddr string) Gateway {
 	return &RPCGateway{
 		httpServer:       &http.Server{Addr: ":" + port},
 		discoveryAddr:    discoveryAddr,
-		clients:          sync.Map{},
+		clients:          &sync.Map{},
 		appendEntriesMsg: make(chan AppendEntriesMsg),
 		requestVoteMsg:   make(chan RequestVoteMsg),
 		commandMsg:       make(chan CommandMsg),
@@ -37,7 +37,7 @@ func NewRPCGateway(port string, discoveryAddr string) Gateway {
 type RPCGateway struct {
 	httpServer       *http.Server
 	discoveryAddr    string
-	clients          sync.Map
+	clients          *sync.Map
 	appendEntriesMsg chan AppendEntriesMsg
 	requestVoteMsg   chan RequestVoteMsg
 	commandMsg       chan CommandMsg
@@ -65,10 +65,10 @@ func newRPCServer(handler any) (*rpc.Server, error) {
 	return rpcServer, nil
 }
 
-func (gateway *RPCGateway) sendRPC(name string, addr string, args any, result any) error {
+func sendRPC(clients *sync.Map, name string, addr string, args any, result any) error {
 	var client *rpc.Client
 	{ // find or create a client
-		clientAny, ok := gateway.clients.Load(addr)
+		clientAny, ok := clients.Load(addr)
 		if ok {
 			client, ok = clientAny.(*rpc.Client)
 			if !ok {
@@ -80,7 +80,7 @@ func (gateway *RPCGateway) sendRPC(name string, addr string, args any, result an
 			if err != nil {
 				return err
 			}
-			gateway.clients.Store(addr, client)
+			clients.Store(addr, client)
 		}
 	}
 
@@ -96,22 +96,22 @@ func (gateway *RPCGateway) sendRPC(name string, addr string, args any, result an
 		}
 		if err != nil {
 			client.Close()
-			gateway.clients.Delete(addr)
+			clients.Delete(addr)
 		}
 	}
 	return err
 }
 
 func (gateway *RPCGateway) Discover(args *DiscoverArgs, result *DiscoverResult) error {
-	return gateway.sendRPC("DiscoveryService.DiscoverRPC", gateway.discoveryAddr, args, result)
+	return sendRPC(gateway.clients, "DiscoveryService.DiscoverRPC", gateway.discoveryAddr, args, result)
 }
 
 func (gateway *RPCGateway) AppendEntries(id string, args *AppendEntriesArgs, result *AppendEntriesResult) error {
-	return gateway.sendRPC("RPCGateway.AppendEntriesRPC", id, args, result)
+	return sendRPC(gateway.clients, "RPCGateway.AppendEntriesRPC", id, args, result)
 }
 
 func (gateway *RPCGateway) RequestVote(id string, args *RequestVoteArgs, result *RequestVoteResult) error {
-	return gateway.sendRPC("RPCGateway.RequestVoteRPC", id, args, result)
+	return sendRPC(gateway.clients, "RPCGateway.RequestVoteRPC", id, args, result)
 }
 
 func (gateway *RPCGateway) AppendEntriesRPC(args *AppendEntriesArgs, result *AppendEntriesResult) error {

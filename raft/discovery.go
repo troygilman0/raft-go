@@ -1,30 +1,33 @@
 package raft
 
 import (
+	"container/heap"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"log/slog"
 	"math/rand"
 	"net/http"
-	"net/rpc"
 	"sync"
 	"time"
 )
 
 type DiscoveryService struct {
-	leader   string
-	servers  map[string]struct{}
-	mutex    sync.Mutex
-	commands chan CommandMsg
-	logger   *slog.Logger
+	servers       map[string]struct{}
+	mutex         sync.Mutex
+	commands      *commandQueue
+	commandsMutex *sync.Mutex
+	clients       *sync.Map
+	logger        *slog.Logger
 }
 
 func NewDiscoveryService(logger *slog.Logger) *DiscoveryService {
+	commands := &commandQueue{}
+	heap.Init(commands)
 	return &DiscoveryService{
-		servers:  make(map[string]struct{}),
-		commands: make(chan CommandMsg, 1000),
-		logger:   logger,
+		servers:       make(map[string]struct{}),
+		commands:      commands,
+		commandsMutex: &sync.Mutex{},
+		clients:       &sync.Map{},
+		logger:        logger,
 	}
 }
 
@@ -66,53 +69,57 @@ type DiscoverResult struct {
 }
 
 func (svc *DiscoveryService) startHandler() {
-	for msg := range svc.commands {
-		err := func() error {
-			// find a possible leader
-			if svc.leader == "" {
-				svc.leader = svc.getRandomServer()
-				if svc.leader == "" {
-					return errors.New("no servers have been registered")
-				}
+	leader := ""
+	for {
+		msg, ok := func() (commandQueueMsg, bool) {
+			svc.commandsMutex.Lock()
+			defer svc.commandsMutex.Unlock()
+			if svc.commands.Len() == 0 {
+				return commandQueueMsg{}, false
 			}
-
-			// make rpc calls until we find the leader and apply the command
-			for {
-				client, err := rpc.DialHTTPPath("tcp", svc.leader, "/rpc")
-				if err != nil {
-					svc.leader = svc.getRandomServer()
-					continue
-				}
-
-				{ // make call with client
-					timeout := time.NewTimer(rpcTimeoutDuration)
-					call := client.Go("RPCGateway.CommandRPC", msg.Args, msg.Result, nil)
-					select {
-					case <-call.Done:
-						err = call.Error
-					case <-timeout.C:
-						err = errors.New("rpc timed out")
-					}
-					if err != nil {
-						client.Close()
-						return fmt.Errorf("calling %s - %s", svc.leader, err.Error())
-					}
-				}
-
-				if msg.Result.Success {
-					break
-				} else {
-					if msg.Result.Redirect != "" {
-						svc.leader = msg.Result.Redirect
-					} else {
-						svc.leader = svc.getRandomServer()
-					}
-				}
-			}
-			return nil
+			return heap.Pop(svc.commands).(commandQueueMsg), true
 		}()
-		_ = err
-		msg.Done <- struct{}{}
+
+		if ok {
+			if msg.leader == "" {
+				if leader == "" || msg.random {
+					leader = svc.getRandomServer()
+				}
+				msg.leader = leader
+			} else {
+				leader = msg.leader
+			}
+
+			go func(commandQueueMsg) {
+				args := &CommandArgs{
+					Command: msg.command,
+				}
+				result := &CommandResult{}
+
+				// make rpc calls until we find the leader and apply the command
+				if err := sendRPC(svc.clients, "RPCGateway.CommandRPC", msg.leader, args, result); err != nil {
+					if svc.logger != nil {
+						svc.logger.Error("calling %s - %s\n", msg.leader, err.Error())
+					}
+				}
+
+				if result.Success {
+					msg.done <- struct{}{}
+				} else {
+					if result.Redirect != "" {
+						msg.leader = result.Redirect
+					} else {
+						msg.leader = ""
+						msg.random = true
+					}
+					svc.commandsMutex.Lock()
+					heap.Push(svc.commands, msg)
+					svc.commandsMutex.Unlock()
+				}
+			}(msg)
+		}
+		time.Sleep(1 * time.Millisecond)
+
 	}
 }
 
@@ -128,16 +135,16 @@ func (svc *DiscoveryService) handleCommand(w http.ResponseWriter, r *http.Reques
 			svc.logger.Info("Discovery handleCommand()", "command", input.Command)
 		}
 
-		msg := CommandMsg{
-			Args: &CommandArgs{
-				Command: input.Command,
-			},
-			Result: &CommandResult{},
-			Done:   make(chan struct{}),
+		svc.commandsMutex.Lock()
+		msg := commandQueueMsg{
+			time:    time.Now(),
+			command: input.Command,
+			done:    make(chan struct{}),
 		}
+		heap.Push(svc.commands, msg)
+		svc.commandsMutex.Unlock()
 
-		svc.commands <- msg
-		<-msg.Done
+		<-msg.done
 		return nil
 	}()
 
@@ -162,4 +169,32 @@ func (svc *DiscoveryService) getRandomServer() string {
 
 type CommandInput struct {
 	Command string `json:"command"`
+}
+
+type commandQueueMsg struct {
+	time    time.Time
+	command string
+	leader  string
+	random  bool
+	done    chan struct{}
+}
+
+type commandQueue []commandQueueMsg
+
+func (q commandQueue) Len() int           { return len(q) }
+func (q commandQueue) Less(i, j int) bool { return q[i].time.Before(q[j].time) }
+func (q commandQueue) Swap(i, j int)      { q[i], q[j] = q[j], q[i] }
+
+func (q *commandQueue) Push(x any) {
+	// Push and Pop use pointer receivers because they modify the slice's length,
+	// not just its contents.
+	*q = append(*q, x.(commandQueueMsg))
+}
+
+func (q *commandQueue) Pop() any {
+	old := *q
+	n := len(old)
+	x := old[n-1]
+	*q = old[0 : n-1]
+	return x
 }

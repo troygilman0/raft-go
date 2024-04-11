@@ -432,7 +432,6 @@ func (server *Server) handleRequestVoteResult(result *RequestVoteResult, gateway
 		if float32(server.votes)/float32(len(server.servers)) > 0.5 {
 			server.slog(slog.LevelInfo, "Promoted to leader")
 			server.leader = server.config.Id
-			server.log = server.log[:server.commitIndex] // discard any uncommitted commands from prev term
 			lastLogIndex, _ := server.lastLogIndexAndTerm()
 			for _, info := range server.servers {
 				info.nextIndex = lastLogIndex + 1

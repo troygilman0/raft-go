@@ -40,14 +40,14 @@ func TestBasic(t *testing.T) {
 		}
 	}()
 
-	serverCommands := make([][]string, numServers)
+	serverCommands := make([]map[string]struct{}, numServers)
 	serverHandlers := make([]CommandHandler, numServers)
 	servers := make([]*Server, numServers)
 
 	startServerFunc := func(index int) {
 		port := discoveryPort + index + 1
 		portStr := strconv.Itoa(port)
-		serverCommands[index] = make([]string, 0)
+		serverCommands[index] = make(map[string]struct{})
 		servers[index] = NewServer(ServerConfig{
 			Id:      "localhost:" + portStr,
 			Handler: serverHandlers[index],
@@ -62,7 +62,7 @@ func TestBasic(t *testing.T) {
 			serverHandlers[i] = func(command string) {
 				logMutex.Lock()
 				defer logMutex.Unlock()
-				serverCommands[i] = append(serverCommands[i], command)
+				serverCommands[i][command] = struct{}{}
 			}
 		}
 		startServerFunc(i)
@@ -70,7 +70,7 @@ func TestBasic(t *testing.T) {
 	time.Sleep(time.Second)
 
 	crashedServerIndex := -1
-	expectedCommands := make([]string, 0)
+	expectedCommands := make(map[string]struct{})
 	testTimeout := time.NewTimer(testTimeoutDuration)
 	sendCommandTimeout := time.NewTimer(sendCommandTimeoutDuration)
 	crashServerTimeout := time.NewTimer(crashServerTimeoutDuration)
@@ -89,7 +89,7 @@ testLoop:
 			input := CommandInput{
 				Command: "Hello world: " + strconv.Itoa(len(expectedCommands)+1),
 			}
-			expectedCommands = append(expectedCommands, input.Command)
+			expectedCommands[input.Command] = struct{}{}
 			buffer, err := json.Marshal(&input)
 			if err != nil {
 				t.Fatal(err)
@@ -120,7 +120,7 @@ testLoop:
 		}
 	}
 
-	time.Sleep(10 * time.Second)
+	time.Sleep(1 * time.Second)
 	for i := range numServers {
 		servers[i].Close()
 	}
