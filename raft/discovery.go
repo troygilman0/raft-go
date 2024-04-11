@@ -157,6 +157,9 @@ func (svc *DiscoveryService) handleCommand(w http.ResponseWriter, r *http.Reques
 func (svc *DiscoveryService) getRandomServer() string {
 	svc.mutex.Lock()
 	defer svc.mutex.Unlock()
+	if len(svc.servers) == 0 {
+		return ""
+	}
 	k := rand.Intn(len(svc.servers))
 	for server := range svc.servers {
 		if k == 0 {
