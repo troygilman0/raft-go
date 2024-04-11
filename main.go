@@ -22,7 +22,7 @@ func main() {
 	_, discovery := os.LookupEnv("DISCOVERY")
 
 	if discovery {
-		raft.NewDiscoveryService().Start(port)
+		raft.NewDiscoveryService(nil).Start(port)
 	} else {
 		config := raft.ServerConfig{
 			Id:     hostname + ":" + port,

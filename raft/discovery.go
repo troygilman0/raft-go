@@ -13,20 +13,18 @@ import (
 )
 
 type DiscoveryService struct {
-	leader           string
-	servers          map[string]struct{}
-	mutex            sync.Mutex
-	command          chan CommandMsg
-	commands         map[uint]CommandMsg
-	commandsMutex    sync.Mutex
-	lastCommandIndex uint
+	leader   string
+	servers  map[string]struct{}
+	mutex    sync.Mutex
+	commands chan CommandMsg
+	logger   *slog.Logger
 }
 
-func NewDiscoveryService() *DiscoveryService {
+func NewDiscoveryService(logger *slog.Logger) *DiscoveryService {
 	return &DiscoveryService{
 		servers:  make(map[string]struct{}),
-		command:  make(chan CommandMsg),
-		commands: make(map[uint]CommandMsg),
+		commands: make(chan CommandMsg, 1000),
+		logger:   logger,
 	}
 }
 
@@ -68,56 +66,53 @@ type DiscoverResult struct {
 }
 
 func (svc *DiscoveryService) startHandler() {
-	for {
-		select {
-		case msg := <-svc.command:
-			err := func() error {
-				// find a possible leader
+	for msg := range svc.commands {
+		err := func() error {
+			// find a possible leader
+			if svc.leader == "" {
+				svc.leader = svc.getRandomServer()
 				if svc.leader == "" {
+					return errors.New("no servers have been registered")
+				}
+			}
+
+			// make rpc calls until we find the leader and apply the command
+			for {
+				client, err := rpc.DialHTTPPath("tcp", svc.leader, "/rpc")
+				if err != nil {
 					svc.leader = svc.getRandomServer()
-					if svc.leader == "" {
-						return errors.New("no servers have been registered")
-					}
+					continue
 				}
 
-				// make rpc calls until we find the leader and apply the command
-				for {
-					client, err := rpc.DialHTTPPath("tcp", svc.leader, "/rpc")
+				{ // make call with client
+					timeout := time.NewTimer(rpcTimeoutDuration)
+					call := client.Go("RPCGateway.CommandRPC", msg.Args, msg.Result, nil)
+					select {
+					case <-call.Done:
+						err = call.Error
+					case <-timeout.C:
+						err = errors.New("rpc timed out")
+					}
 					if err != nil {
-						svc.leader = svc.getRandomServer()
-						continue
-					}
-
-					{ // make call with client
-						timeout := time.NewTimer(rpcTimeoutDuration)
-						call := client.Go("RPCGateway.CommandRPC", msg.Args, msg.Result, nil)
-						select {
-						case <-call.Done:
-							err = call.Error
-						case <-timeout.C:
-							err = errors.New("rpc timed out")
-						}
-						if err != nil {
-							client.Close()
-							return fmt.Errorf("calling %s - %s", svc.leader, err.Error())
-						}
-					}
-
-					if msg.Result.Success {
-						break
-					} else {
-						if msg.Result.Redirect != "" {
-							svc.leader = msg.Result.Redirect
-						} else {
-							svc.leader = svc.getRandomServer()
-						}
+						client.Close()
+						return fmt.Errorf("calling %s - %s", svc.leader, err.Error())
 					}
 				}
-				return nil
-			}()
-			_ = err
-			msg.Done <- struct{}{}
-		}
+
+				if msg.Result.Success {
+					break
+				} else {
+					if msg.Result.Redirect != "" {
+						svc.leader = msg.Result.Redirect
+					} else {
+						svc.leader = svc.getRandomServer()
+					}
+				}
+			}
+			return nil
+		}()
+		_ = err
+		msg.Done <- struct{}{}
 	}
 }
 
@@ -129,6 +124,10 @@ func (svc *DiscoveryService) handleCommand(w http.ResponseWriter, r *http.Reques
 			return err
 		}
 
+		if svc.logger != nil {
+			svc.logger.Info("Discovery handleCommand()", "command", input.Command)
+		}
+
 		msg := CommandMsg{
 			Args: &CommandArgs{
 				Command: input.Command,
@@ -137,7 +136,7 @@ func (svc *DiscoveryService) handleCommand(w http.ResponseWriter, r *http.Reques
 			Done:   make(chan struct{}),
 		}
 
-		svc.command <- msg
+		svc.commands <- msg
 		<-msg.Done
 		return nil
 	}()

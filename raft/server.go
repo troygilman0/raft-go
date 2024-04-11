@@ -200,8 +200,9 @@ func (server *Server) updateStateMachine() {
 	}
 	for server.commitIndex > server.lastApplied {
 		server.lastApplied++
+		entry := server.log[server.lastApplied-1]
 		if server.config.Handler != nil {
-			server.config.Handler(server.log[server.lastApplied-1].Command)
+			server.config.Handler(entry.Command)
 		}
 		commandMsg, ok := server.pendingCommands[server.lastApplied]
 		if ok {
@@ -209,7 +210,7 @@ func (server *Server) updateStateMachine() {
 			commandMsg.Done <- struct{}{}
 			delete(server.pendingCommands, server.lastApplied)
 		}
-		server.slog(slog.LevelInfo, "Applied command", "index", server.lastApplied)
+		server.slog(slog.LevelInfo, "Applied command", "index", server.lastApplied, "command", entry.Command)
 	}
 }
 
@@ -380,6 +381,8 @@ func (server *Server) handleAppendEntries(args *AppendEntriesArgs, result *Appen
 		return
 	}
 
+	server.leader = args.LeaderId
+
 	// Condition #2
 	// Reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
 	if args.PrevLogIndex > 0 {
@@ -414,7 +417,6 @@ func (server *Server) handleAppendEntries(args *AppendEntriesArgs, result *Appen
 		server.commitIndex = min(args.LeaderCommit, newEntryIndex)
 	}
 
-	server.leader = args.LeaderId
 	result.Success = true
 
 	if !server.electionTimeout.Stop() {
@@ -430,6 +432,7 @@ func (server *Server) handleRequestVoteResult(result *RequestVoteResult, gateway
 		if float32(server.votes)/float32(len(server.servers)) > 0.5 {
 			server.slog(slog.LevelInfo, "Promoted to leader")
 			server.leader = server.config.Id
+			server.log = server.log[:server.commitIndex] // discard any uncommitted commands from prev term
 			lastLogIndex, _ := server.lastLogIndexAndTerm()
 			for _, info := range server.servers {
 				info.nextIndex = lastLogIndex + 1
@@ -474,8 +477,8 @@ func (server *Server) handleCommand(msg CommandMsg, gateway Gateway) {
 			Command: msg.Args.Command,
 			Term:    server.currentTerm,
 		})
-		newLogIndex := len(server.log)
-		server.pendingCommands[uint(newLogIndex)] = msg
+		newLogIndex := uint(len(server.log))
+		server.pendingCommands[newLogIndex] = msg
 		server.sendAppendEntriesAll(gateway)
 	} else {
 		msg.Result.Success = false
