@@ -2,6 +2,8 @@ package raft
 
 type CommandHandler func(command string)
 
+type CommandMiddleware func(command string) (interface{}, bool)
+
 type serverState uint
 
 const (
@@ -72,5 +74,6 @@ type CommandArgs struct {
 
 type CommandResult struct {
 	Success  bool
+	Value    interface{}
 	Redirect string
 }

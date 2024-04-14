@@ -17,9 +17,10 @@ const (
 )
 
 type ServerConfig struct {
-	Id      string
-	Handler CommandHandler
-	Logger  *slog.Logger
+	Id         string
+	Handler    CommandHandler
+	Middleware CommandMiddleware
+	Logger     *slog.Logger
 }
 
 type Server struct {
@@ -472,6 +473,14 @@ func (server *Server) handleCommand(msg CommandMsg, gateway Gateway) {
 	}()
 
 	if server.config.Id == server.leader {
+		if server.config.Middleware != nil {
+			if val, ok := server.config.Middleware(msg.Args.Command); ok {
+				msg.Result.Success = true
+				msg.Result.Value = val
+				msg.Done <- struct{}{}
+				return
+			}
+		}
 		server.log = append(server.log, LogEntry{
 			Command: msg.Args.Command,
 			Term:    server.currentTerm,

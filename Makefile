@@ -8,3 +8,7 @@ dev:
 test:
 	@go clean -testcache
 	@go test -v ./raft
+
+test-redis:
+	@go clean -testcache
+	@go test -v ./redis

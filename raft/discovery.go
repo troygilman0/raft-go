@@ -104,7 +104,7 @@ func (svc *DiscoveryService) startHandler() {
 				}
 
 				if result.Success {
-					msg.done <- struct{}{}
+					msg.done <- result.Value
 				} else {
 					if result.Redirect != "" {
 						msg.leader = result.Redirect
@@ -139,12 +139,24 @@ func (svc *DiscoveryService) handleCommand(w http.ResponseWriter, r *http.Reques
 		msg := commandQueueMsg{
 			time:    time.Now(),
 			command: input.Command,
-			done:    make(chan struct{}),
+			done:    make(chan interface{}),
 		}
 		heap.Push(svc.commands, msg)
 		svc.commandsMutex.Unlock()
 
-		<-msg.done
+		value := <-msg.done
+
+		if value != nil {
+			valBuffer, err := json.Marshal(value)
+			if err != nil {
+				return err
+			}
+			_, err = w.Write(valBuffer)
+			if err != nil {
+				return err
+			}
+		}
+
 		return nil
 	}()
 
@@ -152,6 +164,7 @@ func (svc *DiscoveryService) handleCommand(w http.ResponseWriter, r *http.Reques
 		slog.Error("handleCommand()", "error", err.Error())
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+
 }
 
 func (svc *DiscoveryService) getRandomServer() string {
@@ -179,7 +192,7 @@ type commandQueueMsg struct {
 	command string
 	leader  string
 	random  bool
-	done    chan struct{}
+	done    chan interface{}
 }
 
 type commandQueue []commandQueueMsg
