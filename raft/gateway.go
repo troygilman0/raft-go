@@ -16,31 +16,25 @@ type Gateway interface {
 	Discover(args *DiscoverArgs, result *DiscoverResult) error
 	AppendEntries(id string, args *AppendEntriesArgs, result *AppendEntriesResult) error
 	RequestVote(id string, args *RequestVoteArgs, result *RequestVoteResult) error
-	AppendEntriesMsg() <-chan AppendEntriesMsg
-	RequestVoteMsg() <-chan RequestVoteMsg
-	CommandMsg() <-chan CommandMsg
+	Messages() <-chan Message
 	Start() error
 	Close() error
 }
 
 func NewRPCGateway(port string, discoveryAddr string) Gateway {
 	return &RPCGateway{
-		httpServer:       &http.Server{Addr: ":" + port},
-		discoveryAddr:    discoveryAddr,
-		clients:          &sync.Map{},
-		appendEntriesMsg: make(chan AppendEntriesMsg),
-		requestVoteMsg:   make(chan RequestVoteMsg),
-		commandMsg:       make(chan CommandMsg),
+		httpServer:    &http.Server{Addr: ":" + port},
+		discoveryAddr: discoveryAddr,
+		clients:       &sync.Map{},
+		messages:      make(chan Message, 1000),
 	}
 }
 
 type RPCGateway struct {
-	httpServer       *http.Server
-	discoveryAddr    string
-	clients          *sync.Map
-	appendEntriesMsg chan AppendEntriesMsg
-	requestVoteMsg   chan RequestVoteMsg
-	commandMsg       chan CommandMsg
+	httpServer    *http.Server
+	discoveryAddr string
+	clients       *sync.Map
+	messages      chan Message
 }
 
 func (gateway *RPCGateway) Start() error {
@@ -115,48 +109,40 @@ func (gateway *RPCGateway) RequestVote(id string, args *RequestVoteArgs, result 
 }
 
 func (gateway *RPCGateway) AppendEntriesRPC(args *AppendEntriesArgs, result *AppendEntriesResult) error {
-	done := make(chan struct{})
-	gateway.appendEntriesMsg <- AppendEntriesMsg{
-		args:   args,
-		result: result,
-		done:   done,
+	msg := newMessageImpl()
+	gateway.messages <- AppendEntriesMsg{
+		Message: msg,
+		args:    args,
+		result:  result,
 	}
-	<-done
+	<-msg.done
 	return nil
 }
 
 func (gateway *RPCGateway) RequestVoteRPC(args *RequestVoteArgs, result *RequestVoteResult) error {
-	done := make(chan struct{})
-	gateway.requestVoteMsg <- RequestVoteMsg{
-		args:   args,
-		result: result,
-		done:   done,
+	msg := newMessageImpl()
+	gateway.messages <- RequestVoteMsg{
+		Message: msg,
+		args:    args,
+		result:  result,
 	}
-	<-done
+	<-msg.done
 	return nil
 }
 
 func (gateway *RPCGateway) CommandRPC(args *CommandArgs, result *CommandResult) error {
-	done := make(chan struct{})
-	gateway.commandMsg <- CommandMsg{
-		Args:   args,
-		Result: result,
-		Done:   done,
+	msg := newMessageImpl()
+	gateway.messages <- CommandMsg{
+		Message: msg,
+		Args:    args,
+		Result:  result,
 	}
-	<-done
+	<-msg.done
 	return nil
 }
 
-func (gateway *RPCGateway) AppendEntriesMsg() <-chan AppendEntriesMsg {
-	return gateway.appendEntriesMsg
-}
-
-func (gateway *RPCGateway) RequestVoteMsg() <-chan RequestVoteMsg {
-	return gateway.requestVoteMsg
-}
-
-func (gateway *RPCGateway) CommandMsg() <-chan CommandMsg {
-	return gateway.commandMsg
+func (gateway *RPCGateway) Messages() <-chan Message {
+	return gateway.messages
 }
 
 func (gateway *RPCGateway) Close() error {
@@ -178,12 +164,8 @@ func (gateway *RPCGateway) Close() error {
 	flushLoop:
 		for {
 			select {
-			case msg := <-gateway.appendEntriesMsg:
-				msg.done <- struct{}{}
-			case msg := <-gateway.requestVoteMsg:
-				msg.done <- struct{}{}
-			case msg := <-gateway.commandMsg:
-				msg.Done <- struct{}{}
+			case msg := <-gateway.messages:
+				msg.Done()
 			default:
 				break flushLoop
 			}

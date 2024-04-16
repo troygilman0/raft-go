@@ -23,10 +23,28 @@ type LogEntry struct {
 	Term    uint
 }
 
+type Message interface {
+	Done()
+}
+
+func newMessageImpl() messageImpl {
+	return messageImpl{
+		done: make(chan struct{}),
+	}
+}
+
+type messageImpl struct {
+	done chan struct{}
+}
+
+func (m messageImpl) Done() {
+	m.done <- struct{}{}
+}
+
 type AppendEntriesMsg struct {
+	Message
 	args   *AppendEntriesArgs
 	result *AppendEntriesResult
-	done   chan struct{}
 }
 
 type AppendEntriesArgs struct {
@@ -45,9 +63,9 @@ type AppendEntriesResult struct {
 }
 
 type RequestVoteMsg struct {
+	Message
 	args   *RequestVoteArgs
 	result *RequestVoteResult
-	done   chan struct{}
 }
 
 type RequestVoteArgs struct {
@@ -63,9 +81,9 @@ type RequestVoteResult struct {
 }
 
 type CommandMsg struct {
+	Message
 	Args   *CommandArgs
 	Result *CommandResult
-	Done   chan struct{}
 }
 
 type CommandArgs struct {

@@ -86,19 +86,22 @@ func (server *Server) Start(gateway Gateway) {
 eventLoop:
 	for {
 		select {
-		case msg := <-gateway.CommandMsg():
-			// handle Command
-			server.handleCommand(msg, gateway)
-		case msg := <-gateway.AppendEntriesMsg():
-			// handle AppendEntries
-			server.handleExternalTerm(msg.args.Term)
-			server.handleAppendEntries(msg.args, msg.result)
-			msg.done <- struct{}{}
-		case msg := <-gateway.RequestVoteMsg():
-			// handle RequestVote
-			server.handleExternalTerm(msg.args.Term)
-			server.handleRequestVote(msg.args, msg.result)
-			msg.done <- struct{}{}
+		case msg := <-gateway.Messages():
+			switch msg := msg.(type) {
+			case CommandMsg:
+				// handle Command
+				server.handleCommand(msg, gateway)
+			case AppendEntriesMsg:
+				// handle AppendEntries
+				server.handleExternalTerm(msg.args.Term)
+				server.handleAppendEntries(msg.args, msg.result)
+				msg.Done()
+			case RequestVoteMsg:
+				// handle RequestVote
+				server.handleExternalTerm(msg.args.Term)
+				server.handleRequestVote(msg.args, msg.result)
+				msg.Done()
+			}
 		case result := <-server.appendResultsChan:
 			// handle AppendEntries result
 			server.handleExternalTerm(result.Term)
@@ -136,7 +139,7 @@ eventLoop:
 		for index, msg := range server.pendingCommands {
 			server.slog(slog.LevelInfo, "Rejecting command", "index", index, "command", msg.Args.Command)
 			msg.Result.Success = false
-			msg.Done <- struct{}{}
+			msg.Done()
 		}
 	}
 	{ // close gateway
@@ -208,7 +211,7 @@ func (server *Server) updateStateMachine() {
 		commandMsg, ok := server.pendingCommands[server.lastApplied]
 		if ok {
 			commandMsg.Result.Success = true
-			commandMsg.Done <- struct{}{}
+			commandMsg.Done()
 			delete(server.pendingCommands, server.lastApplied)
 		}
 		server.slog(slog.LevelInfo, "Applied command", "index", server.lastApplied, "command", entry.Command)
@@ -477,7 +480,7 @@ func (server *Server) handleCommand(msg CommandMsg, gateway Gateway) {
 			if val, ok := server.config.Middleware(msg.Args.Command); ok {
 				msg.Result.Success = true
 				msg.Result.Value = val
-				msg.Done <- struct{}{}
+				msg.Done()
 				return
 			}
 		}
@@ -491,7 +494,7 @@ func (server *Server) handleCommand(msg CommandMsg, gateway Gateway) {
 	} else {
 		msg.Result.Success = false
 		msg.Result.Redirect = server.leader
-		msg.Done <- struct{}{}
+		msg.Done()
 	}
 }
 
