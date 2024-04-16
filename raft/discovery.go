@@ -97,7 +97,7 @@ func (svc *DiscoveryService) startHandler() {
 				result := &CommandResult{}
 
 				// make rpc calls until we find the leader and apply the command
-				if err := sendRPC(svc.clients, "RPCGateway.CommandRPC", msg.leader, args, result); err != nil {
+				if err := sendRPC(svc.clients, "RPCTransport.CommandRPC", msg.leader, args, result); err != nil {
 					if svc.logger != nil {
 						svc.logger.Error("calling %s - %s\n", msg.leader, err.Error())
 					}

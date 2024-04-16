@@ -51,7 +51,7 @@ func (server *Server) Start() {
 		},
 		Logger: slog.Default(),
 	}
-	raft.NewServer(config).Start(raft.NewRPCGateway(server.config.Port, server.config.DiscoveryAddr))
+	raft.NewServer(config).Start(raft.NewRPCTransport(server.config.Port, server.config.DiscoveryAddr))
 }
 
 func parseCommand(command string) (t commandType, key string, val interface{}) {

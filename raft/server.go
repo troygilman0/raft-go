@@ -60,7 +60,7 @@ func NewServer(config ServerConfig) *Server {
 	}
 }
 
-func (server *Server) Start(gateway Gateway) {
+func (server *Server) Start(transport Transport) {
 	server.stateMutex.Lock()
 	if server.state != serverStateClosed {
 		return
@@ -71,8 +71,8 @@ func (server *Server) Start(gateway Gateway) {
 	server.slog(slog.LevelInfo, "Starting Server")
 
 	go func() {
-		if err := gateway.Start(); err != nil {
-			server.slog(slog.LevelError, "Starting gateway", "error", err.Error())
+		if err := transport.Start(); err != nil {
+			server.slog(slog.LevelError, "Starting transport", "error", err.Error())
 			server.Close()
 		}
 	}()
@@ -86,11 +86,11 @@ func (server *Server) Start(gateway Gateway) {
 eventLoop:
 	for {
 		select {
-		case msg := <-gateway.Messages():
+		case msg := <-transport.Messages():
 			switch msg := msg.(type) {
 			case CommandMsg:
 				// handle Command
-				server.handleCommand(msg, gateway)
+				server.handleCommand(msg, transport)
 			case AppendEntriesMsg:
 				// handle AppendEntries
 				server.handleExternalTerm(msg.args.Term)
@@ -105,23 +105,23 @@ eventLoop:
 		case result := <-server.appendResultsChan:
 			// handle AppendEntries result
 			server.handleExternalTerm(result.Term)
-			server.handleAppendEntriesResult(result, gateway)
+			server.handleAppendEntriesResult(result, transport)
 		case result := <-server.voteResultsChan:
 			// handle RequestVote result
 			server.handleExternalTerm(result.Term)
-			server.handleRequestVoteResult(result, gateway)
+			server.handleRequestVoteResult(result, transport)
 		case <-server.heartbeatTimeout.C:
 			// heartbeat timeout
 			server.heartbeatTimeout.Reset(heartbeatTimeoutDuration)
-			server.discover(gateway)
+			server.discover(transport)
 			if server.config.Id == server.leader {
-				server.sendAppendEntriesAll(gateway)
+				server.sendAppendEntriesAll(transport)
 			}
 		case <-server.electionTimeout.C:
 			// election timeout
 			server.electionTimeout.Reset(newElectionTimoutDuration())
 			if server.config.Id != server.leader {
-				server.startElection(gateway)
+				server.startElection(transport)
 			}
 		case <-server.closeChan:
 			// set state to closing
@@ -144,7 +144,7 @@ eventLoop:
 	}
 	{ // close gateway
 		server.slog(slog.LevelInfo, "Closing gateway")
-		if err := gateway.Close(); err != nil {
+		if err := transport.Close(); err != nil {
 			server.slog(slog.LevelError, "Closing gateway", "error", err.Error())
 		}
 	}
@@ -230,12 +230,12 @@ func newElectionTimoutDuration() time.Duration {
 	return time.Duration(minElectionTimeoutMs+rand.Intn(maxElectionTimeoutMs-minElectionTimeoutMs)) * time.Millisecond
 }
 
-func (server *Server) discover(gateway Gateway) {
+func (server *Server) discover(transport Transport) {
 	args := &DiscoverArgs{
 		Id: server.config.Id,
 	}
 	result := &DiscoverResult{}
-	if err := gateway.Discover(args, result); err != nil {
+	if err := transport.Discover(args, result); err != nil {
 		server.slog(slog.LevelError, "discover()", "error", err.Error())
 		return
 	}
@@ -252,7 +252,7 @@ func (server *Server) discover(gateway Gateway) {
 	}
 }
 
-func (server *Server) startElection(gateway Gateway) {
+func (server *Server) startElection(transport Transport) {
 	defer func() {
 		server.slog(slog.LevelInfo, "Starting election", "term", server.currentTerm)
 	}()
@@ -278,7 +278,7 @@ func (server *Server) startElection(gateway Gateway) {
 		for _, info := range server.servers {
 			go func(id string) {
 				result := &RequestVoteResult{}
-				if err := gateway.RequestVote(id, args, result); err != nil {
+				if err := transport.RequestVote(id, args, result); err != nil {
 					return
 				}
 				server.voteResultsChan <- result
@@ -296,7 +296,7 @@ func (server *Server) lastLogIndexAndTerm() (uint, uint) {
 	return lastLogIndex, lastLogTerm
 }
 
-func (server *Server) sendAppendEntries(id string, gateway Gateway) error {
+func (server *Server) sendAppendEntries(id string, transport Transport) error {
 	info, ok := server.servers[id]
 	if !ok {
 		return errors.New("server does not exist")
@@ -329,7 +329,7 @@ func (server *Server) sendAppendEntries(id string, gateway Gateway) error {
 
 	go func() {
 		result := &AppendEntriesResult{}
-		if err := gateway.AppendEntries(info.id, args, result); err != nil {
+		if err := transport.AppendEntries(info.id, args, result); err != nil {
 			server.slog(slog.LevelError, "sendAppendEntries()", "error", err.Error())
 			return
 		}
@@ -338,16 +338,16 @@ func (server *Server) sendAppendEntries(id string, gateway Gateway) error {
 	return nil
 }
 
-func (server *Server) sendAppendEntriesAll(gateway Gateway) {
+func (server *Server) sendAppendEntriesAll(transport Transport) {
 	server.slog(slog.LevelInfo, "sendAppendEntriesAll()")
 	for id := range server.servers {
-		if err := server.sendAppendEntries(id, gateway); err != nil {
+		if err := server.sendAppendEntries(id, transport); err != nil {
 			server.slog(slog.LevelError, "Sending AppendEntries for "+id, "error", err.Error())
 		}
 	}
 }
 
-func (server *Server) handleAppendEntriesResult(result *AppendEntriesResult, gateway Gateway) {
+func (server *Server) handleAppendEntriesResult(result *AppendEntriesResult, transport Transport) {
 	server.slog(slog.LevelInfo, "handleAppendEntriesResult()", "result", result)
 	info, ok := server.servers[result.Id]
 	if !ok {
@@ -361,7 +361,7 @@ func (server *Server) handleAppendEntriesResult(result *AppendEntriesResult, gat
 		if info.nextIndex > 1 {
 			info.nextIndex--
 		}
-		if err := server.sendAppendEntries(info.id, gateway); err != nil {
+		if err := server.sendAppendEntries(info.id, transport); err != nil {
 			server.slog(slog.LevelInfo, "handleAppendEntriesResult()", "result", result, "error", err)
 		}
 	}
@@ -429,7 +429,7 @@ func (server *Server) handleAppendEntries(args *AppendEntriesArgs, result *Appen
 	server.electionTimeout.Reset(newElectionTimoutDuration())
 }
 
-func (server *Server) handleRequestVoteResult(result *RequestVoteResult, gateway Gateway) {
+func (server *Server) handleRequestVoteResult(result *RequestVoteResult, transport Transport) {
 	server.slog(slog.LevelInfo, "handleRequestVoteResult", "result", result)
 	if result.VoteGranted && result.Term == server.currentTerm && server.leader != server.config.Id {
 		server.votes++
@@ -441,7 +441,7 @@ func (server *Server) handleRequestVoteResult(result *RequestVoteResult, gateway
 				info.nextIndex = lastLogIndex + 1
 				info.matchIndex = 0
 			}
-			server.sendAppendEntriesAll(gateway)
+			server.sendAppendEntriesAll(transport)
 		}
 	}
 }
@@ -470,7 +470,7 @@ func (server *Server) handleRequestVote(args *RequestVoteArgs, result *RequestVo
 	}
 }
 
-func (server *Server) handleCommand(msg CommandMsg, gateway Gateway) {
+func (server *Server) handleCommand(msg CommandMsg, transport Transport) {
 	defer func() {
 		server.slog(slog.LevelInfo, "handleCommand()", "args", msg.Args, "result", msg.Result)
 	}()
@@ -490,7 +490,7 @@ func (server *Server) handleCommand(msg CommandMsg, gateway Gateway) {
 		})
 		newLogIndex := uint(len(server.log))
 		server.pendingCommands[newLogIndex] = msg
-		server.sendAppendEntriesAll(gateway)
+		server.sendAppendEntriesAll(transport)
 	} else {
 		msg.Result.Success = false
 		msg.Result.Redirect = server.leader

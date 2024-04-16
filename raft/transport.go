@@ -12,7 +12,7 @@ const (
 	rpcTimeoutDuration = 200 * time.Millisecond
 )
 
-type Gateway interface {
+type Transport interface {
 	Discover(args *DiscoverArgs, result *DiscoverResult) error
 	AppendEntries(id string, args *AppendEntriesArgs, result *AppendEntriesResult) error
 	RequestVote(id string, args *RequestVoteArgs, result *RequestVoteResult) error
@@ -21,8 +21,8 @@ type Gateway interface {
 	Close() error
 }
 
-func NewRPCGateway(port string, discoveryAddr string) Gateway {
-	return &RPCGateway{
+func NewRPCTransport(port string, discoveryAddr string) Transport {
+	return &RPCTransport{
 		httpServer:    &http.Server{Addr: ":" + port},
 		discoveryAddr: discoveryAddr,
 		clients:       &sync.Map{},
@@ -30,22 +30,22 @@ func NewRPCGateway(port string, discoveryAddr string) Gateway {
 	}
 }
 
-type RPCGateway struct {
+type RPCTransport struct {
 	httpServer    *http.Server
 	discoveryAddr string
 	clients       *sync.Map
 	messages      chan Message
 }
 
-func (gateway *RPCGateway) Start() error {
-	rpcServer, err := newRPCServer(gateway)
+func (t *RPCTransport) Start() error {
+	rpcServer, err := newRPCServer(t)
 	if err != nil {
 		return err
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/rpc", rpcServer)
-	gateway.httpServer.Handler = mux
-	if err := gateway.httpServer.ListenAndServe(); err != http.ErrServerClosed {
+	t.httpServer.Handler = mux
+	if err := t.httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		return err
 	}
 	return nil
@@ -96,21 +96,21 @@ func sendRPC(clients *sync.Map, name string, addr string, args any, result any) 
 	return err
 }
 
-func (gateway *RPCGateway) Discover(args *DiscoverArgs, result *DiscoverResult) error {
-	return sendRPC(gateway.clients, "DiscoveryService.DiscoverRPC", gateway.discoveryAddr, args, result)
+func (t *RPCTransport) Discover(args *DiscoverArgs, result *DiscoverResult) error {
+	return sendRPC(t.clients, "DiscoveryService.DiscoverRPC", t.discoveryAddr, args, result)
 }
 
-func (gateway *RPCGateway) AppendEntries(id string, args *AppendEntriesArgs, result *AppendEntriesResult) error {
-	return sendRPC(gateway.clients, "RPCGateway.AppendEntriesRPC", id, args, result)
+func (t *RPCTransport) AppendEntries(id string, args *AppendEntriesArgs, result *AppendEntriesResult) error {
+	return sendRPC(t.clients, "RPCTransport.AppendEntriesRPC", id, args, result)
 }
 
-func (gateway *RPCGateway) RequestVote(id string, args *RequestVoteArgs, result *RequestVoteResult) error {
-	return sendRPC(gateway.clients, "RPCGateway.RequestVoteRPC", id, args, result)
+func (t *RPCTransport) RequestVote(id string, args *RequestVoteArgs, result *RequestVoteResult) error {
+	return sendRPC(t.clients, "RPCTransport.RequestVoteRPC", id, args, result)
 }
 
-func (gateway *RPCGateway) AppendEntriesRPC(args *AppendEntriesArgs, result *AppendEntriesResult) error {
+func (t *RPCTransport) AppendEntriesRPC(args *AppendEntriesArgs, result *AppendEntriesResult) error {
 	msg := newMessageImpl()
-	gateway.messages <- AppendEntriesMsg{
+	t.messages <- AppendEntriesMsg{
 		Message: msg,
 		args:    args,
 		result:  result,
@@ -119,9 +119,9 @@ func (gateway *RPCGateway) AppendEntriesRPC(args *AppendEntriesArgs, result *App
 	return nil
 }
 
-func (gateway *RPCGateway) RequestVoteRPC(args *RequestVoteArgs, result *RequestVoteResult) error {
+func (t *RPCTransport) RequestVoteRPC(args *RequestVoteArgs, result *RequestVoteResult) error {
 	msg := newMessageImpl()
-	gateway.messages <- RequestVoteMsg{
+	t.messages <- RequestVoteMsg{
 		Message: msg,
 		args:    args,
 		result:  result,
@@ -130,9 +130,9 @@ func (gateway *RPCGateway) RequestVoteRPC(args *RequestVoteArgs, result *Request
 	return nil
 }
 
-func (gateway *RPCGateway) CommandRPC(args *CommandArgs, result *CommandResult) error {
+func (t *RPCTransport) CommandRPC(args *CommandArgs, result *CommandResult) error {
 	msg := newMessageImpl()
-	gateway.messages <- CommandMsg{
+	t.messages <- CommandMsg{
 		Message: msg,
 		Args:    args,
 		Result:  result,
@@ -141,13 +141,13 @@ func (gateway *RPCGateway) CommandRPC(args *CommandArgs, result *CommandResult) 
 	return nil
 }
 
-func (gateway *RPCGateway) Messages() <-chan Message {
-	return gateway.messages
+func (t *RPCTransport) Messages() <-chan Message {
+	return t.messages
 }
 
-func (gateway *RPCGateway) Close() error {
+func (t *RPCTransport) Close() error {
 	{ // close clients
-		gateway.clients.Range(func(key, value any) bool {
+		t.clients.Range(func(key, value any) bool {
 			client, ok := value.(*rpc.Client)
 			if ok {
 				client.Close()
@@ -156,7 +156,7 @@ func (gateway *RPCGateway) Close() error {
 		})
 	}
 	{ // close http server
-		if err := gateway.httpServer.Close(); err != nil {
+		if err := t.httpServer.Close(); err != nil {
 			return err
 		}
 	}
@@ -164,7 +164,7 @@ func (gateway *RPCGateway) Close() error {
 	flushLoop:
 		for {
 			select {
-			case msg := <-gateway.messages:
+			case msg := <-t.messages:
 				msg.Done()
 			default:
 				break flushLoop

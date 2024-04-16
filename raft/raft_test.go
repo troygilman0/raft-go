@@ -53,7 +53,7 @@ func TestBasic(t *testing.T) {
 			Handler: serverHandlers[index],
 			Logger:  logger,
 		})
-		go servers[index].Start(NewRPCGateway(portStr, discoveryAddr))
+		go servers[index].Start(NewRPCTransport(portStr, discoveryAddr))
 	}
 
 	for i := range numServers {

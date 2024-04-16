@@ -28,6 +28,6 @@ func main() {
 			Id:     hostname + ":" + port,
 			Logger: slog.Default(),
 		}
-		raft.NewServer(config).Start(raft.NewRPCGateway(port, discoveryHostname+":"+port))
+		raft.NewServer(config).Start(raft.NewRPCTransport(port, discoveryHostname+":"+port))
 	}
 }
